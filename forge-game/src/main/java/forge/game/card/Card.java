@@ -1543,31 +1543,77 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
     }
 
     public final List<Integer> getStoredRolls() {
-        return storedRolls;
+        // It's generally safer to return an unmodifiable list or a copy
+        // if external modification isn't intended through the getter.
+        // return storedRolls == null ? Collections.emptyList() : Collections.unmodifiableList(storedRolls);
+        // Or if the current implementation relies on returning the modifiable list:
+        return storedRolls == null ? Lists.newArrayList() : storedRolls; // Return empty list if null
     }
+
     public final List<String> getStoredRollsForView() {
         List<String> forView = new ArrayList<>();
-        for (Integer i : storedRolls) {
-            forView.add(String.valueOf(i));
+        if (storedRolls != null) { // Add null check
+            for (Integer i : storedRolls) {
+                forView.add(String.valueOf(i));
+            }
         }
         return forView;
     }
+
     public final void addStoredRolls(final List<Integer> results) {
+        if (results == null || results.isEmpty()) { // Add check for empty results
+            return;
+        }
         if (storedRolls == null) {
             storedRolls = Lists.newArrayList();
         }
         storedRolls.addAll(results);
-        storedRolls.sort(null);
-        view.updateStoredRolls(this);
-    }
-    public final void replaceStoredRoll(final Map<Integer, Integer> replaceMap) {
-        for (Integer oldValue : replaceMap.keySet()) {
-            storedRolls.remove(oldValue);
-            storedRolls.add(replaceMap.get(oldValue));
+        storedRolls.sort(null); // Sort using natural integer order
+        if (view != null) { // Add null check for view
+            view.updateStoredRolls(this);
         }
-        storedRolls.sort(null);
-        view.updateStoredRolls(this);
     }
+
+    /**
+     * Replaces stored dice rolls at specific indices with new values.
+     * Assumes storedRolls is a List<Integer>. Keeps the list sorted afterwards.
+     *
+     * @param indexToNewValueMap A map where keys are the indices in the *current*
+     *                           storedRolls list to replace and values are the new
+     *                           dice roll results.
+     */
+    public final void replaceStoredRollsByIndex(final Map<Integer, Integer> indexToNewValueMap) {
+        // Check for edge cases: no stored rolls or nothing to replace
+        if (storedRolls == null || storedRolls.isEmpty() || indexToNewValueMap == null || indexToNewValueMap.isEmpty()) {
+            return;
+        }
+
+        boolean changed = false;
+        for (Map.Entry<Integer, Integer> entry : indexToNewValueMap.entrySet()) {
+            int index = entry.getKey();
+            int newValue = entry.getValue();
+
+            // Validate the index before attempting to set
+            if (index >= 0 && index < storedRolls.size()) {
+                // Replace the value at the specified index
+                storedRolls.set(index, newValue);
+                changed = true;
+            } else {
+                // Log or handle error: Index out of bounds
+                System.err.println("Warning: Attempted to replace stored roll at invalid index " + index +
+                        " for card " + this.getName() + ". List size: " + storedRolls.size());
+            }
+        }
+
+        // If any replacements were successful, re-sort and update the view
+        if (changed) {
+            storedRolls.sort(null); // Maintain the sorted order
+            if (view != null) { // Add null check for view
+                view.updateStoredRolls(this);
+            }
+        }
+    }
+
 
     public final String getFlipResult(final Player flipper) {
         if (flipResult == null) {

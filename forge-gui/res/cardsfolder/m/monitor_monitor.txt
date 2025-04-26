@@ -1,0 +1,10 @@
+Name:Monitor Monitor
+ManaCost:2 U U
+Types:Creature Human Employee
+PT:2/5
+T:Mode$ ChangesZone | ValidCard$ Card.Self | Origin$ Any | Destination$ Battlefield | Execute$ TrigOpenAttraction | TriggerDescription$ When CARDNAME enters the battlefield, open an Attraction.
+SVar:TrigOpenAttraction:DB$ OpenAttraction
+T:Mode$ AfterRolledDie | ValidPlayer$ You | TriggerZones$ Battlefield | Execute$ TrigReroll | TriggerDescription$ Once each turn, after you roll one or more dice, you may pay {1}. If you do, reroll any number of those dice.
+SVar:TrigReroll:DB$ TriggerAbility | Ability$ DBReroll
+SVar:DBReroll:PostRollAbility$ Reroll | RerollCost$ 1 | RerollMinDice$ 1 | RerollMaxDice$ All | RerollDescription$ {1}: Reroll one or more dice you rolled. | RerollOncePerTurnID$ MonitorMonitorReroll
+Oracle:When Monitor Monitor enters the battlefield, open an Attraction.\nOnce each turn, after you roll one or more dice, you may pay {1}. If you do, reroll any number of those dice.

@@ -228,7 +228,6 @@ public abstract class PlayerController {
     }
 
     public abstract PlanarDice choosePDRollToIgnore(List<PlanarDice> rolls);
-    public abstract Integer chooseRollToIgnore(List<Integer> rolls);
 
     public abstract Object vote(SpellAbility sa, String prompt, List<Object> options, ListMultimap<Object, Player> votes, Player forPlayer, boolean optional);
 
@@ -337,4 +336,146 @@ public abstract class PlayerController {
     }
 
     public boolean isOrderedZone() { return false; }
+
+    /**
+     * Asks the player to choose one die roll result from the provided list to ignore.
+     * Used for effects like Bamboozling Beeble.
+     *
+     * @param rolls The list of current, non-ignored die roll results.
+     * @return The chosen integer result to ignore. Should be one of the elements from the input list.
+     *         Returning null might indicate cancellation or inability to choose.
+     */
+    public abstract Integer chooseRollToIgnore(List<Integer> rolls);
+
+    // Interface for Reroll options
+    public interface RerollOption {
+        // Methods used by RollDiceEffect
+        String getDescription();
+        int getMaxDice();
+        int getMinDice();
+        Card getSourceCard();
+        // Method to mark as used if necessary
+        void markAsUsed();
+        SpellAbility getSpellAbility();
+    }
+
+    // Interface for Modification options
+    public interface ModificationOption {
+        // Methods used by RollDiceEffect
+        String getDescription();
+        boolean isTypePlusMinus();
+        boolean isTypeSetTo();
+        Card getSourceCard();
+        // Method to mark as used if necessary
+        void markAsUsed();
+        SpellAbility getSpellAbility();
+    }
+
+    /**
+     * Gets the available options for the player to reroll dice from the current results.
+     * (Implementation would check for cards like Monitor Monitor).
+     *
+     * @param currentRolls The list of die results after initial roll and ignores.
+     * @param sa The SpellAbility causing the dice roll (can be null).
+     * @return A list of available RerollOption objects. Empty list if none.
+     */
+    public abstract List<RerollOption> getAvailableRerollOptions(List<Integer> currentRolls, SpellAbility sa);
+
+    /**
+     * Asks the player to confirm if they want to use any of the available reroll effects.
+     *
+     * @param options The list of available reroll options.
+     * @return True if the player wants to consider using a reroll effect, false otherwise.
+     */
+    public abstract boolean confirmUseRerollEffect(List<RerollOption> options);
+
+    /**
+     * Asks the player to choose one specific reroll effect to use from the available options.
+     *
+     * @param options The list of available reroll options the player can choose from.
+     * @return The chosen RerollOption. Null if the player cancels or cannot choose.
+     */
+    public abstract RerollOption chooseRerollEffect(List<RerollOption> options);
+
+    /**
+     * Asks the player to choose which specific dice results from the list they want to reroll
+     * using a previously chosen reroll effect.
+     *
+     * @param currentRolls The list of current die results.
+     * @param maxDice The maximum number of dice the player can choose to reroll.
+     * @param minDice The minimum number of dice the player must choose to reroll.
+     * @return A list of *indices* corresponding to the chosen dice in the currentRolls list.
+     *         Empty list if the player cancels or chooses not to reroll any.
+     */
+    public abstract List<Integer> chooseDiceToReroll(List<Integer> currentRolls, int maxDice, int minDice);
+
+
+    /**
+     * Gets the available options for the player to modify dice from the current results.
+     * (Implementation would check for cards like Xenosquirrels, Night Shift, Squirrel-Whacker).
+     *
+     * @param currentRolls The list of die results after rerolls.
+     * @param sa The SpellAbility causing the dice roll (can be null).
+     * @return A list of available ModificationOption objects. Empty list if none.
+     */
+    public abstract List<ModificationOption> getAvailableModificationOptions(List<Integer> currentRolls, SpellAbility sa, int sides);
+
+     /**
+     * Asks the player to confirm if they want to use any of the available modification effects.
+     *
+     * @param options The list of available modification options.
+     * @return True if the player wants to consider using a modification effect, false otherwise.
+     */
+    public abstract boolean confirmUseModificationEffect(List<ModificationOption> options);
+
+    /**
+     * Asks the player to choose one specific modification effect to use from the available options.
+     *
+     * @param options The list of available modification options the player can choose from.
+     * @return The chosen ModificationOption. Null if the player cancels or cannot choose.
+     */
+    public abstract ModificationOption chooseModificationEffect(List<ModificationOption> options);
+
+    /**
+     * Asks the player to choose which specific die result from the list they want to modify
+     * using a previously chosen modification effect.
+     *
+     * @param currentRolls The list of current die results.
+     * @param effect The chosen modification effect being applied.
+     * @return The *index* corresponding to the chosen die in the currentRolls list.
+     *         -1 or null if the player cancels or cannot choose.
+     */
+    public abstract int chooseDieToModify(List<Integer> currentRolls, ModificationOption effect);
+
+    /**
+     * Asks the player to choose whether to add 1 or subtract 1 from a die roll result.
+     * Used for effects like Xenosquirrels or Night Shift.
+     *
+     * @param currentRoll The current value of the die roll being modified.
+     * @return 1 to add one, -1 to subtract one. (Could return 0 for no change/cancel, TBD).
+     */
+    public abstract int chooseModificationDetailPlusMinus(int currentRoll);
+
+    /**
+     * Asks the player to choose whether to change a die roll result to the card's power or toughness.
+     * Used for effects like Squirrel-Whacker.
+     *
+     * @param currentRoll The current value of the die roll being modified.
+     * @param power The power of the source card.
+     * @param toughness The toughness of the source card.
+     * @return The chosen value (either power or toughness).
+     */
+    public abstract int chooseModificationDetailSquirrelWhacker(int currentRoll, int power, int toughness);
+
+    /**
+     * Asks the player to choose which *stored* dice results they want to reroll.
+     * Used for effects like Centaur of Attention.
+     *
+     * @param sa The SpellAbility causing the reroll action.
+     * @param storedRolls The list of currently stored die roll results.
+     * @return A list of *indices* corresponding to the chosen dice in the storedRolls list.
+     *         Empty list if the player cancels or chooses not to reroll any.
+     */
+    public abstract List<Integer> chooseDiceToRerollStored(SpellAbility sa, List<Integer> storedRolls);
+
 }

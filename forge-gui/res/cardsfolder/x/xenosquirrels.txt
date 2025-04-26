@@ -1,0 +1,9 @@
+Name:Xenosquirrels
+ManaCost:1 B
+Types:Creature Alien Squirrel
+PT:0/0
+K:ETBCOUNTERS$PLUS_ONE_PLUS_ONE$2
+T:Mode$ AfterRolledDie | ValidPlayer$ You | TriggerZones$ Battlefield | Execute$ TrigModify | TriggerDescription$ After you roll a die, you may remove a +1/+1 counter from this creature. If you do, increase or decrease the result by 1.
+SVar:TrigModify:DB$ TriggerAbility | Ability$ DBModifyRoll
+SVar:DBModifyRoll:PostRollAbility$ Modify | ModifyCost$ RemoveCounter<PLUS_ONE_PLUS_ONE/1> | ModifyType$ PlusMinus | ModifyDescription$ Remove a +1/+1 counter from {cardname}: Increase or decrease the result by 1.
+Oracle:Xenosquirrels enters the battlefield with two +1/+1 counters on it.\nAfter you roll a die, you may remove a +1/+1 counter from Xenosquirrels. If you do, increase or decrease the result by 1.

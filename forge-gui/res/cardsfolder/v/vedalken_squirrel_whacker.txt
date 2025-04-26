@@ -1,0 +1,21 @@
+Name:Vedalken Squirrel-Whacker
+ManaCost:3 U
+Types:Creature Vedalken Guest
+PT:*/*
+SVar:BasePower:SetVar$0
+SVar:BaseToughness:SetVar$0
+T:Mode$ ChangesZone | ValidCard$ Card.Self | Origin$ Any | Destination$ Battlefield | Execute$ TrigSetPT | TriggerDescription$ As CARDNAME enters the battlefield, roll a six-sided die twice. Its base power becomes the first result and its base toughness becomes the second result.
+SVar:TrigSetPT:DB$ RollDice | Amount$ 2 | Sides$ 6 | SetPower$ FirstRoll | SetToughness$ SecondRoll | RememberObjects$ RolledDiceResults | SubAbility$ SetBasePTSVars
+SVar:SetBasePTSVars:DB$ SetVar | Var$ Host/BasePower | Value$ Remembered$RolledDiceResults.1 | SubAbility$ SetBaseTSVar
+SVar:SetBaseTSVar:DB$ SetVar | Var$ Host/BaseToughness | Value$ Remembered$RolledDiceResults.2
+S:Mode$ Continuous | Affected$ Card.Self | SetPower$ SVar$BasePower | SetToughness$ SVar$BaseToughness | Description$ CARDNAME's power is equal to its base power and its toughness is equal to its base toughness.
+ReplacementEffects:ReplaceD6Roll
+SVar:ReplaceD6Roll:Event$ RollDice | ValidPlayer$ You | ValidSides$ 6 | ReplaceWith$ DoRollAndExchange | Description$ If you would roll one or more six-sided dice, instead roll them and you may exchange one result with CARDNAME's base power or base toughness.
+SVar:DoRollAndExchange:DB$ ReplaceRoll | SubAbility$ OfferExchange
+SVar:OfferExchange:DB$ ChooseRolledDieResult | Prompt$ Choose result to exchange (optional) | MayCancel$ true | RememberObjects$ Card.Self/SVar$BasePower,Card.Self/SVar$BaseToughness | SubAbility$ OfferTargetStat
+SVar:OfferTargetStat:DB$ ChooseAction | CancelAction$ DoNothing | Prompt$ Exchange with Power ({RememberedObject:Card.Self/SVar$BasePower}) or Toughness ({RememberedObject:Card.Self/SVar$BaseToughness})? | Choices$ ExchangePower,ExchangeToughness
+SVar:ExchangePower:DB$ SetVar | Var$ Host/BasePower | Value$ Remembered$ChosenRollResult | SubAbility$ UpdateChosenDieResultPower
+SVar:UpdateChosenDieResultPower:DB$ ModifyRollResult | RollIndex$ Remembered$ChosenRollIndex | NewValue$ Remembered$Card.Self/SVar$BasePower
+SVar:ExchangeToughness:DB$ SetVar | Var$ Host/BaseToughness | Value$ Remembered$ChosenRollResult | SubAbility$ UpdateChosenDieResultToughness
+SVar:UpdateChosenDieResultToughness:DB$ ModifyRollResult | RollIndex$ Remembered$ChosenRollIndex | NewValue$ Remembered$Card.Self/SVar$BaseToughness
+Oracle:As Vedalken Squirrel-Whacker enters the battlefield, roll a six-sided die twice. Its base power becomes the first result and its base toughness becomes the second result.\nIf you would roll one or more six-sided dice, instead roll that many dice and you may exchange one result with Vedalken Squirrel-Whacker's base power or base toughness.

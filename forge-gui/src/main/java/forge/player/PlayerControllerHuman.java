@@ -103,6 +103,106 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
 
     protected Map<SpellAbilityView, SpellAbility> spellViewCache = null;
 
+    /**
+     * Implementation of the RerollOption interface for human players.
+     */
+    public class HumanRerollOption implements RerollOption {
+        private final String description;
+        private final int minDice;
+        private final int maxDice;
+        private final Card sourceCard;
+        private boolean used = false;
+        private SpellAbility sa;
+
+        public HumanRerollOption(String description, int minDice, int maxDice, Card sourceCard, SpellAbility sa) {
+            this.description = description;
+            this.minDice = minDice;
+            this.maxDice = maxDice;
+            this.sourceCard = sourceCard;
+        }
+
+        @Override
+        public String getDescription() {
+            return description;
+        }
+
+        @Override
+        public int getMaxDice() {
+            return maxDice;
+        }
+
+        @Override
+        public int getMinDice() {
+            return minDice;
+        }
+
+        @Override
+        public Card getSourceCard() {
+            return sourceCard;
+        }
+
+        @Override
+        public void markAsUsed() {
+            used = true;
+        }
+
+        public boolean isUsed() {
+            return used;
+        }
+
+        public SpellAbility getSpellAbility() {
+            return sa;
+        }
+    }
+
+    /**
+     * Implementation of the ModificationOption interface for human players.
+     */
+    public class HumanModificationOption implements ModificationOption {
+        private final String description;
+        private final boolean isPlusMinus;
+        private final boolean isSetTo;
+        private final Card sourceCard;
+        private boolean used = false;
+        private SpellAbility sa;
+
+        public HumanModificationOption(String description, boolean isPlusMinus, boolean isSetTo, Card sourceCard, SpellAbility sa) {
+            this.description = description;
+            this.isPlusMinus = isPlusMinus;
+            this.isSetTo = isSetTo;
+            this.sourceCard = sourceCard;
+        }
+
+        @Override
+        public String getDescription() {
+            return description;
+        }
+
+        @Override
+        public boolean isTypePlusMinus() {
+            return isPlusMinus;
+        }
+
+        @Override
+        public boolean isTypeSetTo() {
+            return isSetTo;
+        }
+
+        @Override
+        public Card getSourceCard() {
+            return sourceCard;
+        }
+
+        @Override
+        public void markAsUsed() {
+            used = true;
+        }
+
+        public SpellAbility getSpellAbility() {
+            return sa;
+        }
+    }
+
     public PlayerControllerHuman(final Game game0, final Player p, final LobbyPlayer lp) {
         super(game0, p, lp);
         inputProxy = new InputProxy(this);
@@ -1510,6 +1610,281 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
         final InputBlock inpBlock = new InputBlock(this, defender, combat);
         inpBlock.showAndWait();
         getGui().updateAutoPassPrompt();
+    }
+
+    @Override
+    public List<RerollOption> getAvailableRerollOptions(List<Integer> currentRolls, SpellAbility saOriginatingRoll) {
+        List<RerollOption> options = new ArrayList<>();
+        Player player = getPlayer();
+        // Game game = player.getGame(); // Game might still be needed if AbilityUtils requires it
+        // TurnManager turnManager = game.getTurnManager(); // No longer needed for this check
+
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            for (SpellAbility sa : card.getSpellAbilities()) {
+                if ("Reroll".equals(sa.getParam("PostRollAbility"))) {
+                    // Use the card's built-in tracking for ability activations this turn
+                    boolean alreadyUsed = card.getAbilityActivatedThisTurn(sa) > 0;
+
+                    if (!alreadyUsed) {
+                        int minDice = AbilityUtils.calculateAmount(card, sa.getParamOrDefault("RerollMinDice", "1"), sa);
+                        String maxDiceStr = sa.getParamOrDefault("RerollMaxDice", "All");
+                        int maxDice = maxDiceStr.equalsIgnoreCase("All") ? currentRolls.size() : AbilityUtils.calculateAmount(card, maxDiceStr, sa);
+                        maxDice = Math.min(maxDice, currentRolls.size()); // Can't reroll more than rolled
+
+                        if (maxDice >= minDice && minDice > 0) { // Ensure valid range
+                            String desc = sa.getParamOrDefault("RerollDescription",
+                                    TextUtil.concatWithSpace("Reroll", String.valueOf(minDice), "to", String.valueOf(maxDice), "dice from", card.getName()));
+                            // Add cost to description for UI clarity
+                            String costStr = sa.getParamOrDefault("RerollCost", "None");
+                            if (!"None".equalsIgnoreCase(costStr)) {
+                                desc = TextUtil.concatWithSpace(costStr + ":", desc);
+                            }
+                            options.add(new HumanRerollOption(desc, minDice, maxDice, card, sa));
+                        }
+                    }
+                }
+            }
+        }
+        return options;
+    }
+
+    @Override
+    public List<ModificationOption> getAvailableModificationOptions(List<Integer> currentRolls, SpellAbility saOriginatingRoll, int sides) {
+        List<ModificationOption> options = new ArrayList<>();
+        Player player = getPlayer();
+
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            for (SpellAbility sa : card.getSpellAbilities()) {
+                if ("Modify".equals(sa.getParam("PostRollAbility"))) {
+                    String modifyType = sa.getParam("ModifyType");
+                    if (modifyType == null) continue;
+
+                    String desc = sa.getParamOrDefault("ModifyDescription",
+                            TextUtil.concatWithSpace("Modify result using", card.getName()));
+                    String costStr = sa.getParamOrDefault("ModifyCost", "None");
+                    if (!"None".equalsIgnoreCase(costStr)) {
+                        desc = TextUtil.concatWithSpace(costStr + ":", desc);
+                    }
+
+                    switch (modifyType.toLowerCase()) {
+                        case "plusminus":
+                            options.add(new HumanModificationOption(desc, true, false, card, sa));
+                            break;
+                        case "setto":
+                            options.add(new HumanModificationOption(desc, false, true, card, sa));
+                            break;
+                        // Add other modification types if needed
+                    }
+                }
+            }
+        }
+        return options;
+    }
+
+    @Override
+    public boolean confirmUseRerollEffect(List<RerollOption> options) {
+        if (options == null || options.isEmpty()) {
+            return false;
+        }
+
+        List<String> descriptions = new ArrayList<>();
+        for (RerollOption option : options) {
+            descriptions.add(option.getDescription());
+        }
+
+        String message = localizer.getMessage("lblUseRerollEffect");
+        return getGui().confirm(null, message, true, null);
+    }
+
+    @Override
+    public RerollOption chooseRerollEffect(List<RerollOption> options) {
+        if (options == null || options.isEmpty()) {
+            return null;
+        }
+
+        final String message = localizer.getMessage("lblChooseRerollEffect");
+        List<String> displayOptions = new ArrayList<>();
+        for (RerollOption option : options) {
+            displayOptions.add(option.getDescription());
+        }
+
+        String chosen = getGui().one(message, displayOptions);
+        if (chosen == null || chosen.isEmpty()) {
+            return null; // User canceled
+        }
+
+        for (int i = 0; i < displayOptions.size(); i++) {
+            if (displayOptions.get(i).equals(chosen)) {
+                return options.get(i);
+            }
+        }
+        return null;
+    }
+
+    @Override
+    public List<Integer> chooseDiceToReroll(List<Integer> currentRolls, int maxDice, int minDice) {
+        if (currentRolls == null || currentRolls.isEmpty()) {
+            return new ArrayList<>();
+        }
+
+        List<String> options = new ArrayList<>();
+        for (Integer roll : currentRolls) {
+            options.add(String.valueOf(roll));
+        }
+
+        String message = localizer.getMessage("lblChooseDiceToReroll");
+        if (minDice > 0) {
+            message += " " + localizer.getMessage("lblMustChooseAtLeast", String.valueOf(minDice));
+        }
+        if (maxDice < currentRolls.size()) {
+            message += " " + localizer.getMessage("lblMayChooseUpTo", String.valueOf(maxDice));
+        }
+
+        List<String> chosen = getGui().getChoices(message, minDice, maxDice, options);
+        if (chosen == null || chosen.isEmpty()) {
+            return new ArrayList<>(); // User canceled or chose none
+        }
+
+        List<Integer> result = new ArrayList<>();
+        for (int i = 0; i < currentRolls.size(); i++) {
+            if (chosen.contains(String.valueOf(currentRolls.get(i)))) {
+                result.add(i);
+            }
+        }
+        return result;
+    }
+
+    @Override
+    public boolean confirmUseModificationEffect(List<ModificationOption> options) {
+        if (options == null || options.isEmpty()) {
+            return false;
+        }
+
+        List<String> descriptions = new ArrayList<>();
+        for (ModificationOption option : options) {
+            descriptions.add(option.getDescription());
+        }
+
+        String message = localizer.getMessage("lblUseModificationEffect");
+        return getGui().confirm(null, message, true, null);
+    }
+
+    @Override
+    public ModificationOption chooseModificationEffect(List<ModificationOption> options) {
+        if (options == null || options.isEmpty()) {
+            return null;
+        }
+
+        final String message = localizer.getMessage("lblChooseModificationEffect");
+        List<String> displayOptions = new ArrayList<>();
+        for (ModificationOption option : options) {
+            displayOptions.add(option.getDescription());
+        }
+
+        String chosen = getGui().one(message, displayOptions);
+        if (chosen == null || chosen.isEmpty()) {
+            return null; // User canceled
+        }
+
+        for (int i = 0; i < displayOptions.size(); i++) {
+            if (displayOptions.get(i).equals(chosen)) {
+                return options.get(i);
+            }
+        }
+        return null;
+    }
+
+    @Override
+    public int chooseDieToModify(List<Integer> currentRolls, ModificationOption effect) {
+        if (currentRolls == null || currentRolls.isEmpty()) {
+            return -1;
+        }
+
+        final String message = localizer.getMessage("lblChooseDieToModify");
+        List<String> options = new ArrayList<>();
+        for (Integer roll : currentRolls) {
+            options.add(String.valueOf(roll));
+        }
+
+        String chosen = getGui().one(message, options);
+        if (chosen == null || chosen.isEmpty()) {
+            return -1; // User canceled
+        }
+
+        for (int i = 0; i < currentRolls.size(); i++) {
+            if (String.valueOf(currentRolls.get(i)).equals(chosen)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    @Override
+    public int chooseModificationDetailPlusMinus(int currentRoll) {
+        final String message = localizer.getMessage("lblChooseModification", String.valueOf(currentRoll));
+        List<String> options = new ArrayList<>();
+        options.add("+1 (" + (currentRoll + 1) + ")");
+        options.add("-1 (" + (currentRoll - 1) + ")");
+
+        String chosen = getGui().one(message, options);
+        if (chosen == null || chosen.isEmpty()) {
+            return 0; // User canceled
+        }
+
+        if (chosen.startsWith("+")) {
+            return 1;
+        } else if (chosen.startsWith("-")) {
+            return -1;
+        }
+        return 0;
+    }
+
+    @Override
+    public int chooseModificationDetailSquirrelWhacker(int currentRoll, int power, int toughness) {
+        final String message = localizer.getMessage("lblChooseSetDieTo", String.valueOf(currentRoll));
+        List<String> options = new ArrayList<>();
+        options.add(localizer.getMessage("lblPower") + " (" + power + ")");
+        options.add(localizer.getMessage("lblToughness") + " (" + toughness + ")");
+
+        String chosen = getGui().one(message, options);
+        if (chosen == null || chosen.isEmpty()) {
+            return currentRoll; // User canceled, keep current roll
+        }
+
+        if (chosen.startsWith(localizer.getMessage("lblPower"))) {
+            return power;
+        } else if (chosen.startsWith(localizer.getMessage("lblToughness"))) {
+            return toughness;
+        }
+        return currentRoll;
+    }
+
+    @Override
+    public List<Integer> chooseDiceToRerollStored(SpellAbility sa, List<Integer> storedRolls) {
+        if (storedRolls == null || storedRolls.isEmpty()) {
+            return new ArrayList<>();
+        }
+
+        String cardName = sa.getHostCard() != null ? sa.getHostCard().getName() : "";
+        final String message = localizer.getMessage("lblChooseStoredDiceToReroll", cardName);
+        List<String> options = new ArrayList<>();
+        for (Integer roll : storedRolls) {
+            options.add(String.valueOf(roll));
+        }
+
+        List<String> chosen = getGui().getChoices(message, 0, storedRolls.size(), options);
+        if (chosen == null || chosen.isEmpty()) {
+            return new ArrayList<>(); // User canceled or chose none
+        }
+
+        List<Integer> result = new ArrayList<>();
+        for (int i = 0; i < storedRolls.size(); i++) {
+            String rollValue = String.valueOf(storedRolls.get(i));
+            if (chosen.contains(rollValue)) {
+                result.add(i);
+            }
+        }
+        return result;
     }
 
     @Override
