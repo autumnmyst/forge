@@ -309,6 +309,8 @@ public final class CardEdition implements Comparable<CardEdition> {
     private String code;
     private String code2;
     private String scryfallCode;
+    private String tokensCode;
+    private String tokenFallbackCode;
     private String cardsLanguage;
     private Type   type;
     private String name;
@@ -403,6 +405,7 @@ public final class CardEdition implements Comparable<CardEdition> {
     public String getCode()  { return code;  }
     public String getCode2() { return code2; }
     public String getScryfallCode() { return scryfallCode.toLowerCase(); }
+    public String getTokensCode() { return tokensCode.toLowerCase(); }
     public String getCardsLangCode() { return cardsLanguage.toLowerCase(); }
     public Type   getType()  { return type;  }
     public String getName()  { return name;  }
@@ -478,6 +481,16 @@ public final class CardEdition implements Comparable<CardEdition> {
     public boolean isModern() { return getDate().after(parseDate("2003-07-27")); } //8ED and above are modern except some promo cards and others
 
     public Multimap<String, TokenInSet> getTokens() { return tokenMap; }
+
+    public String getTokenSet(String token) {
+        if (tokenMap.containsKey(token)) {
+            return this.getCode();
+        }
+        if (this.tokenFallbackCode != null) {
+            return StaticData.instance().getCardEdition(this.tokenFallbackCode).getTokenSet(token);
+        }
+        return null;
+    }
 
     @Override
     public int compareTo(final CardEdition o) {
@@ -713,19 +726,11 @@ public final class CardEdition implements Comparable<CardEdition> {
             res.name  = metadata.get("name");
             res.date  = parseDate(metadata.get("date"));
             res.code  = metadata.get("code");
-            res.code2 = metadata.get("code2");
-            if (res.code2 == null) {
-                res.code2 = res.code;
-            }
-            res.scryfallCode = metadata.get("ScryfallCode");
-            if (res.scryfallCode == null) {
-                res.scryfallCode = res.code;
-            }
-            res.cardsLanguage = metadata.get("CardLang");
-            if (res.cardsLanguage == null) {
-                res.cardsLanguage = "en";
-            }
-
+            res.code2 = metadata.get("code2", res.code);
+            res.scryfallCode = metadata.get("ScryfallCode", res.code);
+            res.tokensCode = metadata.get("TokensCode", "T" + res.scryfallCode);
+            res.tokenFallbackCode = metadata.get("TokenFallbackCode");
+            res.cardsLanguage = metadata.get("CardLang", "en");
             res.boosterArts = metadata.getInt("BoosterCovers", 1);
 
             String boosterDesc = metadata.get("Booster");
