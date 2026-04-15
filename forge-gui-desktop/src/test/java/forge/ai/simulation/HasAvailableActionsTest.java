@@ -1236,9 +1236,10 @@ public class HasAvailableActionsTest extends SimulationTest {
         // Plus +1 colorless from Nykthos's basic {T}: Add {C} ability.
         AssertJUnit.assertEquals(8, b.getBucket(ManaBudget.IDX_G));
         AssertJUnit.assertEquals(1, b.getBucket(ManaBudget.IDX_C));
-        // Total: 2 (forests) + 3 (elves net) + 1 (nykthos net: 3-2) + 1
-        // (nykthos C ability) = 7.
-        AssertJUnit.assertEquals(7, b.getTotalMana());
+        // Total: 2 (forests) + 3 (elves net) + max(1 basic, 1 special) = 6.
+        // Nykthos's two tap-self abilities are mutually exclusive per turn,
+        // so only the LARGER net contributes — here max(1, 3-2=1) = 1.
+        AssertJUnit.assertEquals(6, b.getTotalMana());
     }
 
     @Test
@@ -1415,14 +1416,17 @@ public class HasAvailableActionsTest extends SimulationTest {
         AssertJUnit.assertEquals(9, b.getBucket(ManaBudget.IDX_G));
         // C bucket: 1 (Nykthos basic {T}: Add {C}).
         AssertJUnit.assertEquals(1, b.getBucket(ManaBudget.IDX_C));
-        // Total: 3 Forests + 3 Elves + (3-2) Nykthos net + 1 Nykthos {C} = 8.
-        AssertJUnit.assertEquals(8, b.getTotalMana());
+        // Total: 3 Forests + 3 Elves + max(1 basic, 3-2 special) = 7.
+        // Nykthos's two tap-self abilities are mutually exclusive per turn.
+        AssertJUnit.assertEquals(7, b.getTotalMana());
 
         java.util.Set<String> actionable = affordableCardNames(p);
-        // Overrun {2}{G}{G}{G} = 5 cmc, need 3 G. Total 8 ≥ 5, G bucket 9 ≥ 3. Yes.
+        // Overrun {2}{G}{G}{G} = 5 cmc, need 3 G. Total 7 ≥ 5, G bucket 9 ≥ 3. Yes.
         AssertJUnit.assertTrue(actionable.contains("Overrun"));
-        // Craterhoof {5}{G}{G}{G} = 8 cmc. Total 8 ≥ 8, G bucket 9 ≥ 3. Yes.
-        AssertJUnit.assertTrue(actionable.contains("Craterhoof Behemoth"));
+        // Craterhoof {5}{G}{G}{G} = 8 cmc. Total 7 < 8 → NOT affordable
+        // under the corrected max-per-card rule. Previously the test was
+        // wrong because it assumed Nykthos's two abilities stacked.
+        AssertJUnit.assertFalse(actionable.contains("Craterhoof Behemoth"));
         // Giant Spider {3}{G} = 4 cmc. Yes.
         AssertJUnit.assertTrue(actionable.contains("Giant Spider"));
         // Counterspell {U}{U} = 2 cmc but needs U — no U bucket. No.
@@ -2319,6 +2323,390 @@ public class HasAvailableActionsTest extends SimulationTest {
         addCardToZone("Counterspell", p, ZoneType.Hand);
         AssertJUnit.assertFalse("Cube alone can't double an empty pool",
                 canAffordFromHand(p, "Counterspell"));
+    }
+
+    // =================================================================
+    // Three Tree City — Count$Valid with ChosenType qualifier
+    // =================================================================
+
+    @Test
+    public void testThreeTreeCityNoCreaturesDoesNotFlipUnbounded() {
+        // Three Tree City alone with no other creatures. The second mana
+        // ability reads X = creatures of the chosen type you control.
+        // With no creatures at all, creatureCount = 0 and the upper bound
+        // for X is 0. The ability contributes 0 to any color.
+        //
+        // The first ability ({T}: Add {C}) still contributes 1 C.
+        // Total should be 1, not flipped unbounded.
+        Player p = newGame();
+        addCard("Three Tree City", p);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals("C bucket from basic ability only", 1,
+                b.getBucket(ManaBudget.IDX_C));
+        AssertJUnit.assertFalse("total should NOT be unbounded",
+                b.isTotalUnbounded());
+        AssertJUnit.assertFalse("rainbow should NOT be unbounded",
+                b.isBucketUnbounded(ManaBudget.IDX_RAINBOW));
+    }
+
+    @Test
+    public void testThreeTreeCityWithCreaturesBoundsByCreatureCount() {
+        // Three Tree City + 3 Grizzly Bears. creatureCount = 3. The
+        // classifier maps Count$Valid Creature.ChosenType+YouCtrl to
+        // creatureCount as an FN-safe over-count. Second ability cap
+        // × multiplier × grossPerAct = 1 × 3 × 1 = 3 rainbow per activation.
+        //
+        // Net total: gross 3 - cost 2 = 1 per activation.
+        // Bucket rainbow += 3, total += 1.
+        // Plus first ability: C += 1, total += 1.
+        Player p = newGame();
+        addCard("Three Tree City", p);
+        addCards("Grizzly Bears", 3, p);
+        for (Card c : p.getCardsIn(ZoneType.Battlefield)) c.setSickness(false);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        // Rainbow bucket: 3 (second ability's bounded output — buckets still
+        // over-count since they track color reachability, not net mana).
+        AssertJUnit.assertEquals(3, b.getBucket(ManaBudget.IDX_RAINBOW));
+        // C bucket: 1 (first ability).
+        AssertJUnit.assertEquals(1, b.getBucket(ManaBudget.IDX_C));
+        // Total: max(1 first-ability-net, 1 second-ability-net) = 1. The
+        // two abilities share CostTap on the same card, so only one can
+        // fire per turn. Max, not sum.
+        AssertJUnit.assertEquals(1, b.getTotalMana());
+        AssertJUnit.assertFalse("total should NOT be unbounded",
+                b.isTotalUnbounded());
+    }
+
+    @Test
+    public void testThreeTreeCityCannotAffordExpensiveSpell() {
+        // Three Tree City alone — 1 mana from first ability, 0 from
+        // second (no creatures). Hand: Shivan Dragon {4}{R}{R} = 6. Not
+        // affordable — total 1 < 6.
+        Player p = newGame();
+        addCard("Three Tree City", p);
+        addCardToZone("Shivan Dragon", p, ZoneType.Hand);
+        AssertJUnit.assertFalse(canAffordFromHand(p, "Shivan Dragon"));
+    }
+
+    @Test
+    public void testThreeTreeCityChosenOtterCoruscationMage4CmcRejected() {
+        // Scenario: 2 Plains + Three Tree City (chosen type = Otter) +
+        // Coruscation Mage (Otter Wizard) + Wrath of God {2}{W}{W} (4 cmc)
+        // in hand.
+        //
+        // Budget math:
+        //   2 Plains      → W bucket += 2, total += 2.
+        //   Three Tree City (two tap-self OTMAs, max rule applies):
+        //     Basic {T}: Add {C}   → net = 1, bucket C += 1.
+        //     {2}, {T}: Add X Any  → cap=1, multiplier = creatureCount = 1
+        //                            (Coruscation Mage, over-count for
+        //                             Creature.ChosenType+YouCtrl).
+        //                            Bucket RAINBOW += 1, net = 1 - 2 = 0.
+        //     max(1, 0) = 1 contributed to total.
+        //   Coruscation Mage has no mana ability.
+        //
+        // Total: 2 (Plains) + 1 (Three Tree City max) = 3.
+        // Wrath of God = 4 cmc. Total gate 3 < 4 → NOT affordable.
+        // This is the tight-boundary test: one more mana than we have.
+        Player p = newGame();
+        addCards("Plains", 2, p);
+        Card ttc = addCard("Three Tree City", p);
+        ttc.setChosenType("Otter");
+        addCard("Coruscation Mage", p).setSickness(false);
+        addCardToZone("Wrath of God", p, ZoneType.Hand);
+
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        // Verify the budget state.
+        AssertJUnit.assertEquals(2, b.getBucket(ManaBudget.IDX_W));
+        AssertJUnit.assertEquals(1, b.getBucket(ManaBudget.IDX_C));
+        AssertJUnit.assertEquals(1, b.getBucket(ManaBudget.IDX_RAINBOW));
+        // Total: 2 Plains + max(1 basic, 0 second) = 3.
+        AssertJUnit.assertEquals(3, b.getTotalMana());
+        AssertJUnit.assertFalse("Wrath of God (4 cmc) should NOT be affordable with only 3 total mana",
+                canAffordFromHand(p, "Wrath of God"));
+    }
+
+    @Test
+    public void testThreeTreeCityCreaturesAllowCheapRainbowSpell() {
+        // Three Tree City + 3 Bears. Rainbow bucket = 3, total = 2.
+        // Hand: Lightning Bolt {R} = 1 mana, payable from rainbow.
+        Player p = newGame();
+        addCard("Three Tree City", p);
+        addCards("Grizzly Bears", 3, p);
+        for (Card c : p.getCardsIn(ZoneType.Battlefield)) c.setSickness(false);
+        addCardToZone("Lightning Bolt", p, ZoneType.Hand);
+        AssertJUnit.assertTrue(canAffordFromHand(p, "Lightning Bolt"));
+    }
+
+    // =================================================================
+    // OTMA recognition — non-cost-based caps (ActivationLimit, PlayerTurn)
+    // =================================================================
+
+    @Test
+    public void testViviOrnitierActivationLimitOtmaNoContributionAtBasePower() {
+        // Vivi Ornitier is an OTMA via ActivationLimit$ 1 — not via any
+        // self-consuming cost. Cost$ 0, PlayerTurn$ True, ActivationLimit$ 1.
+        //
+        // At base power 0, the Count$CardPower reference returns 0, so
+        // multiplier = 0 and foldIntoBudget returns early. No contribution.
+        // (Bucket UR stays 0, total stays 0.)
+        Player p = newGame();
+        addCard("Vivi Ornitier", p).setSickness(false);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertFalse(scan.hasStructuralBailout());
+        AssertJUnit.assertEquals(0, b.getBucket(ManaBudget.IDX_U));
+        AssertJUnit.assertEquals(0, b.getBucket(ManaBudget.IDX_R));
+        AssertJUnit.assertEquals(0, b.getBucket(ManaBudget.IDX_RAINBOW));
+        AssertJUnit.assertEquals(0, b.getTotalMana());
+    }
+
+    @Test
+    public void testCounterAddViaInternalDoesNotLayerIntoCurrentPower() {
+        // Diagnostic: prove that the test environment's counter-add path
+        // does NOT propagate through to getCurrentPower, even with
+        // addCounterInternal + checkStateEffects. This isolates the issue
+        // as a test-harness limitation — the heuristic reads
+        // getCurrentPower correctly, but counters never reach it in tests.
+        //
+        // In a real game, adding 3 P1P1 counters to a 0/3 creature would
+        // make it 3/6 after SBAs. In the test environment here, it stays
+        // 0/3. That's why the Vivi tests use setBasePower() instead.
+        Player p = newGame();
+        Card vivi = addCard("Vivi Ornitier", p);
+        vivi.setSickness(false);
+        AssertJUnit.assertEquals("base power before counters", 0, vivi.getCurrentPower());
+        vivi.addCounterInternal(forge.game.card.CounterEnumType.P1P1,
+                3, p, false, null, null);
+        AssertJUnit.assertEquals("counters are stored correctly",
+                3, vivi.getCounters(forge.game.card.CounterEnumType.P1P1));
+        p.getGame().getAction().checkStateEffects(true);
+        p.getGame().getAction().checkStateEffects(true);
+        // Ideal behavior in a real game: getCurrentPower() == 3.
+        // Observed behavior in tests: getCurrentPower() == 0.
+        // This assertion documents the test-env limitation; if someday it
+        // starts returning 3, we can drop the setBasePower workaround
+        // in the Vivi tests.
+        AssertJUnit.assertEquals(
+                "test env does not flow counters to currentPower — if this "
+                + "starts returning 3, we can use real counters in Vivi tests",
+                0, vivi.getCurrentPower());
+    }
+
+    @Test
+    public void testSetBasePowerFlowsThroughGetCurrentPower() {
+        // Counter-diagnostic: setBasePower() DOES flow through to
+        // getCurrentPower() in the test env. This proves the workaround is
+        // correct: we're exercising the same getCurrentPower() read-path
+        // that the heuristic uses in production.
+        Player p = newGame();
+        Card vivi = addCard("Vivi Ornitier", p);
+        vivi.setSickness(false);
+        AssertJUnit.assertEquals(0, vivi.getCurrentPower());
+        vivi.setBasePower(3);
+        p.getGame().getAction().checkStateEffects(true);
+        AssertJUnit.assertEquals("setBasePower flows through to getCurrentPower",
+                3, vivi.getCurrentPower());
+    }
+
+    @Test
+    public void testViviOrnitierPowerScalingContribution() {
+        // Vivi base power is 0. In the test environment, +1/+1 counters
+        // don't actually propagate through to getCurrentPower via any
+        // counter-adding API (setCounters, addCounter, addCounterInternal)
+        // even with checkStateEffects — the continuous-effect layer for
+        // counter-based P/T boost doesn't register without a full game
+        // tick. Instead, set the base power directly to simulate "Vivi
+        // at power 3 after some counters were added."
+        //
+        // With current power = 3: multiplier = 3, cap = 1 (ActivationLimit),
+        // Produced "Combo U R" → rainbow bucket += 3, total += 3.
+        Player p = newGame();
+        Card vivi = addCard("Vivi Ornitier", p);
+        vivi.setSickness(false);
+        vivi.setBasePower(3);
+        p.getGame().getAction().checkStateEffects(true);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals("rainbow from Combo UR via CardPower",
+                3, b.getBucket(ManaBudget.IDX_RAINBOW));
+        AssertJUnit.assertEquals("total net (Cost$ 0, gross 3)", 3, b.getTotalMana());
+    }
+
+    @Test
+    public void testViviOrnitierCanAffordCheapSpell() {
+        // Vivi with base power 2 → contributes 2 rainbow.
+        // Lightning Bolt {R} is affordable.
+        Player p = newGame();
+        Card vivi = addCard("Vivi Ornitier", p);
+        vivi.setSickness(false);
+        vivi.setBasePower(2);
+        p.getGame().getAction().checkStateEffects(true);
+        addCardToZone("Lightning Bolt", p, ZoneType.Hand);
+        AssertJUnit.assertTrue(canAffordFromHand(p, "Lightning Bolt"));
+    }
+
+    @Test
+    public void testViviOrnitierOncePerTurnCap() {
+        // Vivi at base power 5. ActivationLimit$ 1 means cap = 1, so the
+        // contribution is one activation's worth of mana (5 rainbow), not
+        // 5 × something. Shivan Dragon (6 cmc) is NOT affordable from 5.
+        Player p = newGame();
+        Card vivi = addCard("Vivi Ornitier", p);
+        vivi.setSickness(false);
+        vivi.setBasePower(5);
+        p.getGame().getAction().checkStateEffects(true);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals("5 rainbow from one activation at power 5",
+                5, b.getBucket(ManaBudget.IDX_RAINBOW));
+        AssertJUnit.assertEquals(5, b.getTotalMana());
+        addCardToZone("Shivan Dragon", p, ZoneType.Hand); // {4}{R}{R} = 6
+        AssertJUnit.assertFalse("Shivan Dragon (6 cmc) should NOT be affordable",
+                canAffordFromHand(p, "Shivan Dragon"));
+    }
+
+    // =================================================================
+    // Exclusion group: SAC (sacrifice-self OTMAs)
+    // =================================================================
+
+    @Test
+    public void testLotusPetalSacSelfSingleActivation() {
+        // Lotus Petal: {T}, Sacrifice Lotus Petal: Add one mana of any
+        // color. It's an OTMA via both CostTap (tap-lockout) AND
+        // CostSacrifice-self (sac-lockout). The exclusion classifier
+        // picks TAP as the strongest lockout group since the tap cost is
+        // present. Cap = 1, produces 1 rainbow per activation.
+        Player p = newGame();
+        addCard("Lotus Petal", p).setSickness(false);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals(1, b.getBucket(ManaBudget.IDX_RAINBOW));
+        AssertJUnit.assertEquals(1, b.getTotalMana());
+    }
+
+    @Test
+    public void testMultipleLotusPetalsStackIndependently() {
+        // Three Lotus Petals: each is a separate card, so their
+        // contributions sum normally. Per-card exclusion grouping is
+        // per-card, not across the whole battlefield.
+        Player p = newGame();
+        addCards("Lotus Petal", 3, p);
+        for (Card c : p.getCardsIn(ZoneType.Battlefield)) c.setSickness(false);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals(3, b.getBucket(ManaBudget.IDX_RAINBOW));
+        AssertJUnit.assertEquals(3, b.getTotalMana());
+    }
+
+    // =================================================================
+    // Exclusion group: EXILE (exile-self-from-hand OTMAs)
+    // =================================================================
+
+    @Test
+    public void testElvishSpiritGuideExileFromHandOtma() {
+        // Elvish Spirit Guide: Exile this card from your hand: Add {G}.
+        // Exile-self-from-hand exclusion group. Cap = 1, produces 1 G.
+        Player p = newGame();
+        addCardToZone("Elvish Spirit Guide", p, ZoneType.Hand);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals(1, b.getBucket(ManaBudget.IDX_G));
+        AssertJUnit.assertEquals(1, b.getTotalMana());
+    }
+
+    @Test
+    public void testTwoSpiritGuidesInHandStackIndependently() {
+        // Two separate Spirit Guide cards in hand → two separate card
+        // instances → two separate exclusion keys → contributions sum.
+        Player p = newGame();
+        addCardToZone("Elvish Spirit Guide", p, ZoneType.Hand);
+        addCardToZone("Elvish Spirit Guide", p, ZoneType.Hand);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals(2, b.getBucket(ManaBudget.IDX_G));
+        AssertJUnit.assertEquals(2, b.getTotalMana());
+    }
+
+    @Test
+    public void testRockfaceVillageRestrictedTapSelfSharesWithUnrestricted() {
+        // Rockface Village has TWO tap-self mana abilities:
+        //   {T}: Add {C}                                   — unrestricted
+        //   {T}: Add {R}    (spend only on creature spells) — restricted
+        // They share the tap, so only ONE can fire per turn.
+        //
+        // Board: Island, Mountain, Rockface Village, Stormcatch Mentor.
+        // Hand: Bria, Riptide Rogue {2}{U}{R} = 4 cmc (creature).
+        //
+        // Real max mana = 1 U + 1 R + max(1 C, 1 R restricted) = 3 mana.
+        // Bria = 4 mana → NOT affordable.
+        //
+        // Stormcatch Mentor's cost reducer only applies to instants and
+        // sorceries, not creatures, so it doesn't help Bria either.
+        Player p = newGame();
+        addCard("Island", p);
+        addCard("Mountain", p);
+        addCard("Rockface Village", p);
+        addCard("Stormcatch Mentor", p).setSickness(false);
+        addCardToZone("Bria, Riptide Rogue", p, ZoneType.Hand);
+        AssertJUnit.assertFalse(
+                "Bria should NOT be affordable — Rockface's two tap abilities share a tap",
+                canAffordFromHand(p, "Bria, Riptide Rogue"));
+    }
+
+    @Test
+    public void testStormcatchMentorReducesInstantNotCreature() {
+        // Stormcatch Mentor's static reduces instants/sorceries by {1}.
+        // Critical discriminator: both a 2-cmc instant and a 2-cmc creature
+        // with only 1 Island available. The instant is reduced to {U} and
+        // becomes affordable; the creature is NOT reduced (ValidCard$
+        // Instant,Sorcery filter) and stays unaffordable.
+        Player p = newGame();
+        addCard("Island", p);
+        addCard("Stormcatch Mentor", p); // sick, but static still applies
+        addCardToZone("Mana Leak", p, ZoneType.Hand);       // {1}{U} instant
+        addCardToZone("Merfolk Looter", p, ZoneType.Hand);  // {1}{U} creature
+        AssertJUnit.assertTrue("Mana Leak should be affordable (reduced to {U})",
+                canAffordFromHand(p, "Mana Leak"));
+        AssertJUnit.assertFalse("Merfolk Looter should NOT be affordable (reducer excludes creatures)",
+                canAffordFromHand(p, "Merfolk Looter"));
+    }
+
+    @Test
+    public void testFloatingManaCombinedWithLandSourcesShortfall() {
+        // Pool: 1 R floating. Board: 1 Mountain + 1 Forest = 3 total mana.
+        // Bloodbraid Elf is {2}{R}{G} = 4 cmc → NOT affordable.
+        Player p = newGame();
+        addCard("Mountain", p);
+        addCard("Forest", p);
+        Card poolSrc = createCard("Mountain", p);
+        p.getManaPool().addMana(new forge.game.mana.Mana(
+                (byte) forge.card.mana.ManaAtom.RED, poolSrc, null, p), false);
+        addCardToZone("Bloodbraid Elf", p, ZoneType.Hand);
+        AssertJUnit.assertFalse(
+                "Bloodbraid Elf should NOT be affordable with only 3 total mana",
+                canAffordFromHand(p, "Bloodbraid Elf"));
+    }
+
+    @Test
+    public void testFloatingManaCombinedWithLandSourcesAffordable() {
+        // Pool: 2 R floating. Board: 1 Mountain + 1 Forest = 4 total mana
+        // (3 R reachable, 1 G reachable). Bloodbraid Elf {2}{R}{G} fits.
+        Player p = newGame();
+        addCard("Mountain", p);
+        addCard("Forest", p);
+        Card poolSrc = createCard("Mountain", p);
+        p.getManaPool().addMana(new forge.game.mana.Mana(
+                (byte) forge.card.mana.ManaAtom.RED, poolSrc, null, p), false);
+        p.getManaPool().addMana(new forge.game.mana.Mana(
+                (byte) forge.card.mana.ManaAtom.RED, poolSrc, null, p), false);
+        addCardToZone("Bloodbraid Elf", p, ZoneType.Hand);
+        AssertJUnit.assertTrue(
+                "Bloodbraid Elf should be affordable with 2R floating + Mountain + Forest",
+                canAffordFromHand(p, "Bloodbraid Elf"));
     }
 
     // --- Sanity canary ---

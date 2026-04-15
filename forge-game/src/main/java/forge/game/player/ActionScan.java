@@ -185,6 +185,69 @@ public final class ActionScan {
     // ------------------------------------------------------------------
     final ManaBudget budget = new ManaBudget();
 
+    // ------------------------------------------------------------------
+    // Per-card mutual-exclusion OTMA tracking. Categories of OTMAs that
+    // compete for card-local resources can only fire one at a time per
+    // priority window. For each exclusion group, we take the MAX net
+    // across mana abilities in that group on the same card — not sum.
+    // Buckets still receive all contributions (bucket accounting tracks
+    // color reachability, not net mana).
+    //
+    // Groups:
+    //   TAP   — CostTap / CostExert (share the card's tapped state).
+    //   SAC   — CostSacrifice self (once per game, card destroyed).
+    //   EXILE — CostExile self from hand (once per game, card removed).
+    //
+    // Populated during Pass 2 by foldIntoBudget and special-pattern
+    // handlers; committed to budget.totalMana at the end of Pass 2.
+    // ------------------------------------------------------------------
+    /**
+     * Per-card mutual-exclusion groups for OTMA contributions.
+     *
+     * Cards can have multiple mana abilities that compete for a card-local
+     * resource. Each ability is classified into ONE group based on which
+     * resources its cost consumes:
+     *
+     *  - TAP           — ability uses CostTap only (no sac-self).
+     *  - SAC           — ability uses CostSacrifice-self only (no tap).
+     *  - TAP_SAC_COMBO — ability uses BOTH CostTap AND CostSacrifice-self
+     *                    in the same cost (e.g. Lotus Petal's `{T}, Sac:
+     *                    Add any`).
+     *  - EXILE         — ability uses CostExile-self-from-hand (separate
+     *                    zone, non-interacting with tap/sac).
+     *
+     * The per-card commit combines them using the formula
+     * {@code contribution = max(COMBO, TAP_only + SAC_only) + EXILE},
+     * which correctly handles all combinations including the tricky
+     * TAP_SAC_COMBO + SAC case where the combo ability destroys the card
+     * and locks out the pure-sac ability.
+     */
+    public enum ExclusionGroup { TAP, SAC, TAP_SAC_COMBO, EXILE }
+
+    static final class ExclusionKey {
+        final Card card;
+        final ExclusionGroup group;
+        ExclusionKey(Card c, ExclusionGroup g) { this.card = c; this.group = g; }
+        @Override public boolean equals(Object o) {
+            if (!(o instanceof ExclusionKey)) return false;
+            ExclusionKey k = (ExclusionKey) o;
+            return card == k.card && group == k.group;
+        }
+        @Override public int hashCode() {
+            return System.identityHashCode(card) * 31 + group.ordinal();
+        }
+    }
+
+    final Map<ExclusionKey, Integer> exclusionMaxNetByKey = new HashMap<>();
+    final java.util.Set<ExclusionKey> exclusionUnboundedKeys = new java.util.HashSet<>();
+
+    // Back-compat alias for the old field name — tap-self is the most
+    // common exclusion group and some call sites still reference it.
+    // (Kept so external callers compile; new code should use the keyed
+    // maps directly.)
+    final Map<Card, Integer> tapSelfMaxNetPerCard = new HashMap<>();
+    final java.util.Set<Card> tapSelfUnboundedCards = new java.util.HashSet<>();
+
     ActionScan() {}
 
     public List<SpellAbility> getSpellsToCheck() {
@@ -275,9 +338,14 @@ public final class ActionScan {
         s.budget.allColorsFungible = s.allColorsFungible;
 
         // Seed budget with floating mana before estimator pass so hybrid/generic
-        // shards see it.
+        // shards see it. Floating mana counts toward both per-color buckets
+        // AND totalMana — it's already in the pool, no activation cost.
         for (int i = 0; i < ManaBudget.NUM_BUCKETS; i++) {
-            s.budget.perColor[i] += s.floatingMana[i];
+            int amt = s.floatingMana[i];
+            if (amt <= 0) continue;
+            s.budget.perColor[i] += amt;
+            long sum = (long) s.budget.totalMana + (long) amt;
+            s.budget.totalMana = sum >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) sum;
         }
 
         // Special patterns first so their deltas (life, hand) are visible to
@@ -289,6 +357,81 @@ public final class ActionScan {
         // Pass 2: dispatch each mana ability through the estimator.
         for (SpellAbility ma : s.manaAbilities) {
             ManaAbilityEstimator.estimate(ma, s, s.budget);
+        }
+
+        // Commit per-card mutual-exclusion contributions. For each card,
+        // compute the best reachable total given that the card's mana
+        // abilities compete for tap-self and sac-self resources:
+        //
+        //   contribution = max(COMBO, TAP + SAC) + EXILE
+        //
+        // where TAP / SAC / COMBO are the max nets within each group on
+        // that card, and EXILE is independent (different zone). The
+        // formula reflects that:
+        //   - A combined {T},Sac ability destroys the card, locking out
+        //     everything else; its contribution alone is the best you get
+        //     from that branch.
+        //   - Tap-only + sac-only abilities CAN both fire (tap first, sac
+        //     second), so their contributions sum.
+        //   - The player picks whichever branch yields more mana.
+        java.util.Map<Card, java.util.EnumMap<ExclusionGroup, Integer>> byCard =
+                new java.util.HashMap<>();
+        java.util.Map<Card, java.util.EnumSet<ExclusionGroup>> unboundedByCard =
+                new java.util.HashMap<>();
+        for (Map.Entry<ExclusionKey, Integer> e : s.exclusionMaxNetByKey.entrySet()) {
+            byCard.computeIfAbsent(e.getKey().card,
+                    k -> new java.util.EnumMap<>(ExclusionGroup.class))
+                    .put(e.getKey().group, e.getValue());
+        }
+        for (ExclusionKey k : s.exclusionUnboundedKeys) {
+            unboundedByCard.computeIfAbsent(k.card,
+                    c -> java.util.EnumSet.noneOf(ExclusionGroup.class)).add(k.group);
+        }
+        java.util.Set<Card> allCards = new java.util.HashSet<>(byCard.keySet());
+        allCards.addAll(unboundedByCard.keySet());
+        for (Card card : allCards) {
+            java.util.EnumMap<ExclusionGroup, Integer> perGroup =
+                    byCard.getOrDefault(card, new java.util.EnumMap<>(ExclusionGroup.class));
+            java.util.EnumSet<ExclusionGroup> unb = unboundedByCard.getOrDefault(card,
+                    java.util.EnumSet.noneOf(ExclusionGroup.class));
+
+            int tapOnly = perGroup.getOrDefault(ExclusionGroup.TAP, 0);
+            int sacOnly = perGroup.getOrDefault(ExclusionGroup.SAC, 0);
+            int combo = perGroup.getOrDefault(ExclusionGroup.TAP_SAC_COMBO, 0);
+            int exile = perGroup.getOrDefault(ExclusionGroup.EXILE, 0);
+
+            // Tap/sac branch: any unbounded contributor makes the whole
+            // branch unbounded.
+            if (unb.contains(ExclusionGroup.TAP)
+                    || unb.contains(ExclusionGroup.SAC)
+                    || unb.contains(ExclusionGroup.TAP_SAC_COMBO)) {
+                s.budget.totalUnbounded = true;
+            } else {
+                int tapSacBest = Math.max(combo, tapOnly + sacOnly);
+                if (tapSacBest > 0) {
+                    long sum = (long) s.budget.totalMana + (long) tapSacBest;
+                    s.budget.totalMana = sum >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) sum;
+                }
+            }
+
+            // Exile-from-hand is independent — different zone, no overlap
+            // with the tap/sac resources.
+            if (unb.contains(ExclusionGroup.EXILE)) {
+                s.budget.totalUnbounded = true;
+            } else if (exile > 0) {
+                long sum = (long) s.budget.totalMana + (long) exile;
+                s.budget.totalMana = sum >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) sum;
+            }
+        }
+        // Legacy: also commit anything that got routed through the old
+        // tap-self-only map (retained for any call sites not yet migrated).
+        if (!s.tapSelfUnboundedCards.isEmpty()) {
+            s.budget.totalUnbounded = true;
+        }
+        for (Integer netTotal : s.tapSelfMaxNetPerCard.values()) {
+            if (netTotal == null || netTotal <= 0) continue;
+            long sum = (long) s.budget.totalMana + (long) netTotal;
+            s.budget.totalMana = sum >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) sum;
         }
 
         // Phase 5 post-processing (multiplier promotion, color-converting RMA fixed-point).

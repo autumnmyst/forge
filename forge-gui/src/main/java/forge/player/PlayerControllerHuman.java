@@ -1594,6 +1594,53 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
         getGui().clearWeaklySelectable();
     }
 
+    /**
+     * Push the set of creatures the player could legally declare as attackers
+     * right now. Called from {@link forge.gamemodes.match.input.InputAttack}
+     * when attack declaration begins so the blue-outline highlights reflect
+     * valid attacker candidates.
+     */
+    public void pushAttackerCandidates(final Player attackingPlayer) {
+        final Set<CardView> result = Sets.newHashSet();
+        for (final Card c : attackingPlayer.getCreaturesInPlay()) {
+            if (forge.game.combat.CombatUtil.canAttack(c)) {
+                result.add(c.getView());
+            }
+        }
+        getGui().setWeaklySelectable(result);
+    }
+
+    /**
+     * Push the set of creatures the player could legally declare as blockers
+     * right now. Called from {@link forge.gamemodes.match.input.InputBlock}
+     * when block declaration begins. The candidates are the defending
+     * player's untapped creatures that could block at least one attacker.
+     */
+    public void pushBlockerCandidates(final Player defendingPlayer,
+            final forge.game.combat.Combat combat) {
+        final Set<CardView> result = Sets.newHashSet();
+        if (combat == null) {
+            getGui().setWeaklySelectable(result);
+            return;
+        }
+        final Iterable<Card> attackers = combat.getAttackers();
+        for (final Card blocker : defendingPlayer.getCreaturesInPlay()) {
+            if (!forge.game.combat.CombatUtil.canBlock(blocker)) continue;
+            // Only highlight if the blocker can block at least one live attacker.
+            boolean canBlockSomething = false;
+            for (final Card atk : attackers) {
+                if (forge.game.combat.CombatUtil.canBlock(atk, blocker, combat)) {
+                    canBlockSomething = true;
+                    break;
+                }
+            }
+            if (canBlockSomething) {
+                result.add(blocker.getView());
+            }
+        }
+        getGui().setWeaklySelectable(result);
+    }
+
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
         netLog.trace("ENTRY for player {}, phase={}, isGameOver={}",

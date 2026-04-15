@@ -2,9 +2,9 @@ package forge.game.player;
 
 import forge.card.MagicColor;
 import forge.game.ability.ApiType;
+import forge.game.card.Card;
 import forge.game.cost.Cost;
 import forge.game.cost.CostDiscard;
-import forge.game.cost.CostExert;
 import forge.game.cost.CostExile;
 import forge.game.cost.CostPart;
 import forge.game.cost.CostPayEnergy;
@@ -94,8 +94,18 @@ final class ManaAbilityEstimator {
         int manaCost = activationManaCost(sa);
         int netPerAct = Math.max(0, maxDev - manaCost);
         int net = saturatingMul(cap, netPerAct);
-        long newTotal = (long) budget.totalMana + (long) net;
-        budget.totalMana = newTotal >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) newTotal;
+        // Nykthos's ChooseColor ability is tap-self — route through the
+        // per-card tracker so it groups with the basic {T}: Add {C} ability
+        // for max-not-sum total accounting.
+        Card host = sa.getHostCard();
+        if (host != null && net > 0) {
+            ActionScan.ExclusionKey key = new ActionScan.ExclusionKey(
+                    host, ActionScan.ExclusionGroup.TAP);
+            Integer current = scan.exclusionMaxNetByKey.get(key);
+            if (current == null || net > current) {
+                scan.exclusionMaxNetByKey.put(key, net);
+            }
+        }
     }
 
     /**
@@ -125,7 +135,55 @@ final class ManaAbilityEstimator {
      * Resolve {@code ma} and fold its contribution into {@code budget}. Uses
      * {@code scan} for tracked-value reads.
      */
+    /** Classify a mana ability's mutual-exclusion group. Each ability is
+     *  placed in exactly one group based on which card-local resources its
+     *  cost consumes. The commit step in {@code ActionScan.scan} then
+     *  computes the per-card contribution using a formula that handles
+     *  every combination correctly (see {@link ActionScan.ExclusionGroup}).
+     *
+     *  Returns {@code null} for abilities that don't share a card-local
+     *  resource (including shared-pool OTMAs like PayLife, Discard,
+     *  tapXType, etc. — those are handled as independent sums, which
+     *  over-counts when the pool is shared but is FP-safe).
+     */
+    static ActionScan.ExclusionGroup exclusionGroupOf(SpellAbility sa) {
+        Cost cost = sa.getPayCosts();
+        if (cost == null) return null;
+        boolean hasTap = false;
+        boolean hasSacSelf = false;
+        boolean hasExileSelfHand = false;
+        for (CostPart part : cost.getCostParts()) {
+            if (part instanceof CostTap) {
+                hasTap = true;
+            } else if (part instanceof CostSacrifice && part.payCostFromSource()) {
+                hasSacSelf = true;
+            } else if (part instanceof CostExile) {
+                CostExile ex = (CostExile) part;
+                if (ex.payCostFromSource() && ex.getFrom() != null
+                        && ex.getFrom().contains(ZoneType.Hand)) {
+                    hasExileSelfHand = true;
+                }
+            }
+        }
+        // Combined tap+sac on a single ability gets its own group — it's
+        // not a pure TAP and not a pure SAC, and the commit formula
+        // specifically compares it against TAP + SAC.
+        if (hasTap && hasSacSelf) return ActionScan.ExclusionGroup.TAP_SAC_COMBO;
+        if (hasTap) return ActionScan.ExclusionGroup.TAP;
+        if (hasSacSelf) return ActionScan.ExclusionGroup.SAC;
+        if (hasExileSelfHand) return ActionScan.ExclusionGroup.EXILE;
+        return null;
+    }
+
     static void estimate(SpellAbility ma, ActionScan scan, ManaBudget budget) {
+        estimate(ma, scan, budget, true);
+    }
+
+    /** Internal entry that allows callers to disable the tap-self-OTMA
+     *  max-per-card routing (used by special-pattern handlers that already
+     *  manage their own total accounting). */
+    static void estimate(SpellAbility ma, ActionScan scan, ManaBudget budget,
+                         boolean routeTapSelfThroughScan) {
         AbilityManaPart mp = findManaPart(ma);
         if (mp == null) return;
 
@@ -154,7 +212,8 @@ final class ManaAbilityEstimator {
         int cap = computeActivationCap(ma, scan);
         int perActivation = resolveAmount(ma, scan);
         int manaCostPerActivation = activationManaCost(ma);
-        foldIntoBudget(ma, mp, cap, perActivation, manaCostPerActivation, budget);
+        foldIntoBudget(ma, mp, cap, perActivation, manaCostPerActivation,
+                budget, routeTapSelfThroughScan ? scan : null);
     }
 
     /**
@@ -216,7 +275,6 @@ final class ManaAbilityEstimator {
      *  cost type we don't recognize). */
     private static int capForCostPart(CostPart part, SpellAbility sa, ActionScan scan) {
         if (part instanceof CostTap) return 1;
-        if (part instanceof CostExert) return 1;
         if (part instanceof CostSacrifice) {
             CostSacrifice cs = (CostSacrifice) part;
             if (cs.payCostFromSource()) return 1;
@@ -423,20 +481,26 @@ final class ManaAbilityEstimator {
             }
             return scan.getHighestToughness() + scan.getTotalMinusOneCounters();
         }
+        // Creature filters — match any Count$Valid Creature*YouCtrl pattern.
+        // This covers plain Creature.YouCtrl AND qualified variants like
+        // Creature.ChosenType+YouCtrl (Three Tree City), Creature.Elf+YouCtrl,
+        // Creature.nonToken+YouCtrl, etc. The upper bound is creatureCount
+        // regardless of qualifier — the qualifier can only narrow the set
+        // further, so the unqualified count is a safe over-count.
         if (contains(svar, "YourCreatures") || contains(svar, "Creatures.YouCtrl")
-                || matchesValid(svar, "Creature.YouCtrl")) {
+                || isYouCtrlFilter(svar, "Creature")) {
             return scan.creatureCount;
         }
         if (contains(svar, "YourLandsUntapped") || contains(svar, "Lands.YouCtrl+untapped")) {
             return scan.untappedLands;
         }
-        if (contains(svar, "YourLands") || matchesValid(svar, "Land.YouCtrl")) {
+        if (contains(svar, "YourLands") || isYouCtrlFilter(svar, "Land")) {
             return scan.landCount;
         }
-        if (contains(svar, "YourArtifacts") || matchesValid(svar, "Artifact.YouCtrl")) {
+        if (contains(svar, "YourArtifacts") || isYouCtrlFilter(svar, "Artifact")) {
             return scan.artifactCount;
         }
-        if (contains(svar, "YourEnchantments") || matchesValid(svar, "Enchantment.YouCtrl")) {
+        if (contains(svar, "YourEnchantments") || isYouCtrlFilter(svar, "Enchantment")) {
             return scan.enchantmentCount;
         }
         // Source-card counter references — Astral Cornucopia, Calciform
@@ -469,8 +533,23 @@ final class ManaAbilityEstimator {
             return UNBOUNDED;
         }
 
-        // Fallback: unknown shape (e.g. Count$Valid with a subtype filter we don't
-        // special-case). Unbounded is FN-safe.
+        // Generic fallback: for unrecognized Count$Valid shapes, delegate to
+        // Forge's own amount calculator. This evaluates the filter predicate
+        // against the current game state and returns a concrete number. If
+        // anything goes wrong (unresolved context, thrown exception), fall
+        // back to UNBOUNDED (FN-safe).
+        if (svar.startsWith("Count$Valid ") && sa != null && sa.getHostCard() != null) {
+            try {
+                String amt = sa.getParamOrDefault("Amount", "1");
+                int n = forge.game.ability.AbilityUtils.calculateAmount(
+                        sa.getHostCard(), amt, sa);
+                if (n >= 0) return n;
+            } catch (Throwable ex) {
+                // fall through
+            }
+        }
+
+        // Unknown shape. Unbounded is FN-safe.
         return UNBOUNDED;
     }
 
@@ -497,6 +576,18 @@ final class ManaAbilityEstimator {
         return svar.startsWith("Count$Valid ") && svar.contains(validExpr);
     }
 
+    /** Match any {@code Count$Valid <Type>*YouCtrl} pattern. The type token
+     *  can be followed by any sequence of qualifier tokens (separated by
+     *  {@code '+'}, {@code '.'}, or words) before reaching {@code YouCtrl}.
+     *  Used to recognize {@code Creature.ChosenType+YouCtrl},
+     *  {@code Creature.Elf+YouCtrl}, plain {@code Creature.YouCtrl}, etc. */
+    private static boolean isYouCtrlFilter(String svar, String typePrefix) {
+        if (!svar.startsWith("Count$Valid ")) return false;
+        int typeIdx = svar.indexOf(typePrefix);
+        if (typeIdx < 0) return false;
+        return svar.indexOf("YouCtrl", typeIdx) > typeIdx;
+    }
+
     // ---------------------------------------------------------------
     // Produced-color fold
     // ---------------------------------------------------------------
@@ -521,7 +612,8 @@ final class ManaAbilityEstimator {
      * too few tokens) nothing is added.
      */
     static void foldIntoBudget(SpellAbility sa, AbilityManaPart mp, int cap, int multiplier,
-                                int manaCostPerActivation, ManaBudget budget) {
+                                int manaCostPerActivation, ManaBudget budget,
+                                ActionScan scanForTapSelfRouting) {
         if (cap <= 0 || multiplier == 0) return;
 
         boolean unbounded = cap == Integer.MAX_VALUE || multiplier == UNBOUNDED;
@@ -569,6 +661,34 @@ final class ManaAbilityEstimator {
             long diff = (long) grossTotal - (long) costTotal;
             netTotal = diff <= 0 ? 0
                     : diff >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) diff;
+        }
+
+        // Mutual-exclusion routing. If this OTMA belongs to a card-local
+        // exclusion group (TAP, SAC, or EXILE), its total contribution is
+        // deferred to the per-card-group max tracker on the scan. Each
+        // group gets committed separately at the end of Pass 2.
+        //
+        // This routing applies to BOTH unrestricted and restricted (RC)
+        // contributions: a card with `{T}: Add {C}` and `{T}: Add {R}
+        // (creature spells only)` (Rockface Village) shares the tap between
+        // the two abilities, so their total contribution must be taken as
+        // a max, not summed. Restricted contributions still populate their
+        // bucket via rc.perColor for color-reachability; the rc.totalMana
+        // sum is deliberately skipped so we don't double-count.
+        ActionScan.ExclusionGroup excl = scanForTapSelfRouting == null
+                ? null : exclusionGroupOf(sa);
+        if (excl != null && sa.getHostCard() != null) {
+            Card host = sa.getHostCard();
+            ActionScan.ExclusionKey key = new ActionScan.ExclusionKey(host, excl);
+            if (unbounded) {
+                scanForTapSelfRouting.exclusionUnboundedKeys.add(key);
+            } else if (netTotal > 0) {
+                Integer current = scanForTapSelfRouting.exclusionMaxNetByKey.get(key);
+                if (current == null || netTotal > current) {
+                    scanForTapSelfRouting.exclusionMaxNetByKey.put(key, netTotal);
+                }
+            }
+            return;
         }
 
         if (rc == null) {
