@@ -2716,6 +2716,104 @@ public class HasAvailableActionsTest extends SimulationTest {
     }
 
     @Test
+    public void testPearlOfWisdomSelfDiscountWithOtter() {
+        // Pearl of Wisdom: {2}{U} sorcery, "Costs {1} less if you control
+        // an Otter." The discount is a ValidCard$ Card.Self ReduceCost
+        // static with EffectZone$ All — defined on the card itself in hand.
+        // ActionScan must collect this static when walking the hand.
+        //
+        // Board: 2 Islands + Bria, Riptide Rogue (an Otter).
+        // Hand: Pearl of Wisdom. Effective cost: {2}{U} - {1} = {1}{U}.
+        // 2 Islands pay → affordable.
+        Player p = newGame();
+        addCards("Island", 2, p);
+        addCard("Bria, Riptide Rogue", p).setSickness(false);
+        addCardToZone("Pearl of Wisdom", p, ZoneType.Hand);
+        AssertJUnit.assertTrue("Pearl of Wisdom should be discounted to {1}{U} with an Otter",
+                canAffordFromHand(p, "Pearl of Wisdom"));
+    }
+
+    @Test
+    public void testPearlOfWisdomNoOtterNotDiscounted() {
+        // Same setup without an Otter. Discount IsPresent$ Otter.YouCtrl
+        // condition fails, so cost stays {2}{U}. Only 2 Islands → not affordable.
+        Player p = newGame();
+        addCards("Island", 2, p);
+        addCardToZone("Pearl of Wisdom", p, ZoneType.Hand);
+        AssertJUnit.assertFalse("Pearl of Wisdom needs {2}{U} = 3 mana without an Otter",
+                canAffordFromHand(p, "Pearl of Wisdom"));
+    }
+
+    @Test
+    public void testUrDragonCommandZoneEminenceDiscountsDragons() {
+        // The Ur-Dragon: S:Mode$ ReduceCost | EffectZone$ Battlefield,Command
+        // | ValidCard$ Dragon.Other | Amount$ 1 — Eminence: other Dragon
+        // spells cost {1} less while Ur-Dragon is in the command zone or
+        // on the battlefield.
+        //
+        // Setup: Ur-Dragon in command zone, 3 Mountains + Sol Ring,
+        // Shivan Dragon ({4}{R}{R} = 6 cmc) in hand. Total mana = 5
+        // (3 Mountains + 2 Sol Ring), so without the discount Shivan
+        // Dragon (6 cmc) is NOT affordable. With the {1} discount it
+        // becomes effective {3}{R}{R} = 5 cmc → exactly affordable.
+        //
+        // This proves ActionScan picks up the Ur-Dragon static from the
+        // command zone via scanCardReplacementsAndStatics, and that the
+        // EffectZone$ Battlefield,Command param is honored.
+        Player p = newGame();
+        addCards("Mountain", 3, p);
+        addCard("Sol Ring", p).setSickness(false);
+        addCardToZone("The Ur-Dragon", p, ZoneType.Command);
+        addCardToZone("Shivan Dragon", p, ZoneType.Hand);
+        AssertJUnit.assertTrue(
+                "Shivan Dragon should be affordable with The Ur-Dragon eminence discount",
+                canAffordFromHand(p, "Shivan Dragon"));
+    }
+
+    @Test
+    public void testUrDragonAbsentNoDiscount() {
+        // Same setup but without The Ur-Dragon. No discount → Shivan
+        // Dragon stays at 6 cmc → only 5 mana available → NOT affordable.
+        Player p = newGame();
+        addCards("Mountain", 3, p);
+        addCard("Sol Ring", p).setSickness(false);
+        addCardToZone("Shivan Dragon", p, ZoneType.Hand);
+        AssertJUnit.assertFalse(
+                "Shivan Dragon should NOT be affordable without the Ur-Dragon discount",
+                canAffordFromHand(p, "Shivan Dragon"));
+    }
+
+    @Test
+    public void testGhaltaPrimalHungerSelfDiscountByCreaturePower() {
+        // Ghalta, Primal Hunger: {10}{G}{G} (12 cmc), self-discount by
+        // total power of creatures you control. Static is on the card
+        // itself with EffectZone$ All, so it's active in hand.
+        //
+        // Setup: 2 Forests + 5 Grizzly Bears (10 power total). Discount
+        // = 10 → effective cost {G}{G} = 2 mana. 2 Forests pay exactly.
+        Player p = newGame();
+        addCards("Forest", 2, p);
+        addCards("Grizzly Bears", 5, p);
+        for (Card c : p.getCardsIn(ZoneType.Battlefield)) c.setSickness(false);
+        addCardToZone("Ghalta, Primal Hunger", p, ZoneType.Hand);
+        AssertJUnit.assertTrue(
+                "Ghalta should be affordable: discounted from 12 cmc to {G}{G} by 10 power",
+                canAffordFromHand(p, "Ghalta, Primal Hunger"));
+    }
+
+    @Test
+    public void testGhaltaWithoutCreaturesNotAffordable() {
+        // 2 Forests, no creatures → no discount → Ghalta stays {10}{G}{G}
+        // → needs 12 mana → not affordable from 2 Forests.
+        Player p = newGame();
+        addCards("Forest", 2, p);
+        addCardToZone("Ghalta, Primal Hunger", p, ZoneType.Hand);
+        AssertJUnit.assertFalse(
+                "Ghalta needs 12 mana without any creatures to discount via power",
+                canAffordFromHand(p, "Ghalta, Primal Hunger"));
+    }
+
+    @Test
     public void testStormcatchMentorReducesInstantNotCreature() {
         // Stormcatch Mentor's static reduces instants/sorceries by {1}.
         // Critical discriminator: both a 2-cmc instant and a 2-cmc creature

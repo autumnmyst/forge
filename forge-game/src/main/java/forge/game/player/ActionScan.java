@@ -678,8 +678,15 @@ public final class ActionScan {
     }
 
     /** Partition SAs from a card the player can play/activate via MayPlay or
-     *  cross-zone permissions, without doing any per-zone tallying. */
+     *  cross-zone permissions, without doing any per-zone tallying. Also
+     *  collects any cost-modifying statics on the card whose EffectZone
+     *  includes the card's actual current zone (e.g. a self-discount on a
+     *  card sitting on top of the library, reachable via Future Sight). */
     private void visitExternalZoneCard(Player p, Card c) {
+        ZoneType currentZone = c.getZone() != null ? c.getZone().getZoneType() : null;
+        if (currentZone != null) {
+            collectZoneStatics(c, currentZone);
+        }
         for (SpellAbility sa : c.getAllPossibleAbilities(p, true)) {
             classifySa(sa);
             if (structuralBailout) return;
@@ -700,6 +707,16 @@ public final class ActionScan {
             // Effect card with a TapsForMana trigger that persists until
             // end of turn). The regular battlefield scan would miss those.
             scanCardReplacementsAndStatics(c);
+        } else {
+            // Hand / Graveyard / Exile: collect cost-modifying statics
+            // whose EffectZone includes this card's current zone. The
+            // canonical case is a "self-discount" — Pearl of Wisdom et al.
+            // ("Costs {1} less if you control an Otter", written as a
+            // ValidCard$ Card.Self ReduceCost static with EffectZone$ All).
+            // ~270 cards use this pattern. Skipped silently for cards with
+            // no statics — empty getStaticAbilities() makes this a no-op
+            // for the vast majority of hand cards.
+            collectZoneStatics(c, zone);
         }
 
         // Partition SAs for all zones (spells, activated abilities, mana abilities)
@@ -727,6 +744,21 @@ public final class ActionScan {
         }
     }
 
+    /** Pick up cost-modifying statics on a card sitting in a non-battlefield
+     *  zone (hand, graveyard, exile), but only when the static's
+     *  {@code EffectZone} includes that zone. Most cards carry no statics
+     *  → empty list, no overhead. */
+    private void collectZoneStatics(Card c, ZoneType zone) {
+        for (StaticAbility sa : c.getStaticAbilities()) {
+            java.util.Set<ZoneType> active = sa.getActiveZone();
+            if (active != null && !active.contains(zone)) continue;
+            var modes = sa.getMode();
+            if (modes.contains(StaticAbilityMode.ReduceCost)) reduceCostStatics.add(sa);
+            if (modes.contains(StaticAbilityMode.RaiseCost)) raiseCostStatics.add(sa);
+            if (modes.contains(StaticAbilityMode.SetCost)) setCostStatics.add(sa);
+        }
+    }
+
     private void scanCardReplacementsAndStatics(Card c) {
         // Event=ProduceMana replacements → mana multiplier present (Mana Reflection,
         // Caged Sun, Mirari's Wake, Gauntlet of Power, Extraplanar Lens).
@@ -738,11 +770,18 @@ public final class ActionScan {
                 }
             }
         }
+        ZoneType currentZone = c.getZone() != null ? c.getZone().getZoneType() : null;
         // One pass over statics: classify by mode as we go. Each card usually
-        // has 0-2 static abilities so this is a tight loop.
+        // has 0-2 static abilities so this is a tight loop. Cost-modifying
+        // statics are gated by EffectZone so a battlefield card with
+        // EffectZone$ Hand (rare but possible) doesn't get its reducer
+        // collected from the wrong zone.
         for (StaticAbility sa : c.getStaticAbilities()) {
             var modes = sa.getMode();
             if (modes.contains(StaticAbilityMode.ManaConvert)) allColorsFungible = true;
+            java.util.Set<ZoneType> active = sa.getActiveZone();
+            boolean zoneOk = active == null || currentZone == null || active.contains(currentZone);
+            if (!zoneOk) continue;
             if (modes.contains(StaticAbilityMode.ReduceCost)) reduceCostStatics.add(sa);
             if (modes.contains(StaticAbilityMode.RaiseCost)) raiseCostStatics.add(sa);
             if (modes.contains(StaticAbilityMode.SetCost)) setCostStatics.add(sa);
