@@ -1600,12 +1600,19 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
      * when attack declaration begins so the blue-outline highlights reflect
      * valid attacker candidates.
      */
-    public void pushAttackerCandidates(final Player attackingPlayer) {
+    public void pushAttackerCandidates(final Player attackingPlayer,
+            final forge.game.combat.Combat combat) {
         final Set<CardView> result = Sets.newHashSet();
         for (final Card c : attackingPlayer.getCreaturesInPlay()) {
-            if (forge.game.combat.CombatUtil.canAttack(c)) {
-                result.add(c.getView());
-            }
+            if (!forge.game.combat.CombatUtil.canAttack(c)) continue;
+            // Skip creatures already declared as attackers — they can't
+            // attack again this turn. Mirrors the blocker side, where
+            // canBlock(blocker, combat) drops blockers that have hit
+            // their per-turn block-count limit. Result: a creature loses
+            // its highlight the moment it's clicked, and gets it back
+            // if you right-click to call it back.
+            if (combat != null && combat.isAttacking(c)) continue;
+            result.add(c.getView());
         }
         getGui().setWeaklySelectable(result);
     }
