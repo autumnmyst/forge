@@ -580,22 +580,12 @@ public class PlayerView extends GameEntityView {
                 hasAvailableActionsCache = true;
                 return;
             }
-            if (budget.canAfford(sa, scan) && hasValidTargets(sa)) {
+            if (budget.canAfford(sa, scan) && scan.hasLegalTargets(sa)) {
                 hasAvailableActionsCache = true;
                 return;
             }
         }
         hasAvailableActionsCache = false;
-    }
-
-    /**
-     * Check if a spell/ability has at least one valid target (or doesn't need targets).
-     */
-    private boolean hasValidTargets(SpellAbility sa) {
-        if (!sa.usesTargeting()) {
-            return true;
-        }
-        return sa.getTargetRestrictions().hasCandidates(sa);
     }
 
     private List<String> getDetailsList() {

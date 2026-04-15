@@ -291,6 +291,67 @@ public final class ActionScan {
         return player;
     }
 
+    /**
+     * Pre-flight mirror of the cast-time auto-abort gate in
+     * {@code TargetSelection.chooseTargets()}
+     * (forge-gui/src/main/java/forge/player/TargetSelection.java:107-118).
+     *
+     * When a player clicks a targeted spell that has no legal targets, the
+     * game cancels the cast silently and the card stays in hand. This
+     * predicate reports the same yes/no so the highlight and APINA paths
+     * filter those spells out.
+     *
+     * Kept as a literal mirror (not a shared helper) so callers of the
+     * real cast path are free to evolve their logic without worrying about
+     * this heuristic. If the two drift, the heuristic errs toward FP
+     * (extra highlights) rather than FN (missed actions). If this ever
+     * does drift, re-sync by re-reading TargetSelection.chooseTargets.
+     *
+     * FN-safe: any unexpected state falls through to {@code true}.
+     */
+    public boolean hasLegalTargets(SpellAbility sa) {
+        try {
+            if (!sa.usesTargeting()) return true;
+            forge.game.spellability.TargetRestrictions tgt = sa.getTargetRestrictions();
+            if (tgt == null) return true;
+
+            int minTargets = sa.getMinTargets();
+            int maxTargets = sa.getMaxTargets();
+            if (maxTargets == 0 && minTargets == 0) return true;
+            // Optional targeting — cast proceeds without targets.
+            if (minTargets == 0) return true;
+
+            // Stack-zone targets: chooseCardFromStack handles these at cast
+            // time. Empty stack → nothing to target, auto-aborts.
+            java.util.List<ZoneType> zones = tgt.getZone();
+            if (zones != null && zones.size() == 1 && zones.get(0) == ZoneType.Stack) {
+                return !player.getGame().getStack().isEmpty();
+            }
+
+            // getAllCandidates dereferences sa.getActivatingPlayer().getGame().
+            boolean needsRestore = sa.getActivatingPlayer() == null;
+            if (needsRestore) sa.setActivatingPlayer(player);
+            try {
+                java.util.List<forge.game.GameEntity> candidates = tgt.getAllCandidates(sa, true);
+                if (candidates.size() < minTargets) return false;
+                if (tgt.isDifferentControllers() || tgt.isForEachPlayer()) {
+                    java.util.Set<Player> controllers = new java.util.HashSet<>();
+                    for (forge.game.GameEntity ge : candidates) {
+                        if (ge instanceof forge.game.card.Card) {
+                            controllers.add(((forge.game.card.Card) ge).getController());
+                        }
+                    }
+                    if (controllers.size() < minTargets) return false;
+                }
+                return true;
+            } finally {
+                if (needsRestore) sa.setActivatingPlayer(null);
+            }
+        } catch (Throwable t) {
+            return true;
+        }
+    }
+
     public int getUntappedTokens() {
         return untappedTokens;
     }

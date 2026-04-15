@@ -64,7 +64,8 @@ public class HasAvailableActionsTest extends SimulationTest {
         java.util.Set<String> result = new java.util.HashSet<>();
         if (scan.hasStructuralBailout()) return result; // fall back not modeled in tests
         for (forge.game.spellability.SpellAbility sa : scan.getSpellsToCheck()) {
-            if (sa.isLandAbility() || scan.getBudget().canAfford(sa, scan)) {
+            if (sa.isLandAbility()
+                    || (scan.getBudget().canAfford(sa, scan) && scan.hasLegalTargets(sa))) {
                 if (sa.getHostCard() != null) {
                     result.add(sa.getHostCard().getName());
                 }
@@ -123,8 +124,10 @@ public class HasAvailableActionsTest extends SimulationTest {
         Player p = newGame();
         addCards("Mountain", 5, p);
         addCard("Mycosynth Lattice", p);
-        addCardToZone("Counterspell", p, ZoneType.Hand);
-        // Lattice makes all colors fungible — 5 red lands pay {U}{U}.
+        // Divination is untargeted ({2}{U}) so the target-gate pre-flight
+        // doesn't filter it; the test is purely about color fungibility.
+        addCardToZone("Divination", p, ZoneType.Hand);
+        // Lattice makes all colors fungible — 5 red lands pay {2}{U}.
         AssertJUnit.assertTrue(hasActions(p));
     }
 
@@ -261,9 +264,9 @@ public class HasAvailableActionsTest extends SimulationTest {
         Player p = newGame();
         addCards("Island", 1, p);
         addCard("Goblin Electromancer", p);
-        // Grants {T}: add U... no wait, Electromancer reduces cost of instants/sorceries
-        // by {1}. Mana Leak is {1}{U}; reduced to {U}. 1 Island pays.
-        addCardToZone("Mana Leak", p, ZoneType.Hand);
+        // Electromancer reduces cost of instants/sorceries by {1}. Impulse
+        // is {1}{U} untargeted; reduced to {U}. 1 Island pays.
+        addCardToZone("Impulse", p, ZoneType.Hand);
         AssertJUnit.assertTrue(hasActions(p));
     }
 
@@ -337,7 +340,7 @@ public class HasAvailableActionsTest extends SimulationTest {
     public void testMultiCardHandFindsFirstAffordable() {
         Player p = newGame();
         addCards("Island", 2, p);
-        addCardToZone("Counterspell", p, ZoneType.Hand); // {U}{U} — affordable
+        addCardToZone("Brainstorm", p, ZoneType.Hand); // {U} — affordable, untargeted
         addCardToZone("Lightning Bolt", p, ZoneType.Hand); // {R} — not
         AssertJUnit.assertTrue(hasActions(p));
     }
@@ -1342,12 +1345,14 @@ public class HasAvailableActionsTest extends SimulationTest {
         //   1 Sol Ring (net 2 C)
         //   1 Izzet Signet (net 1, +1 U +1 R gross)
         //   2 Mountain Giants in play (summoning sick creatures)
-        // Hand:
-        //   Counterspell {U}{U}            — affordable
-        //   Lightning Bolt {R}             — affordable
-        //   Shivan Dragon {4}{R}{R}         — affordable (6 cmc ≤ 7 total, 2 R available)
-        //   Cancel {1}{U}{U}                — affordable
-        //   Flametongue Kavu {3}{R}         — affordable
+        // Hand (all untargeted so the cast-gate pre-flight doesn't filter):
+        //   Brainstorm {U}                  — 1 cmc instant
+        //   Divination {2}{U}               — 3 cmc sorcery
+        //   Shivan Dragon {4}{R}{R}         — 6 cmc, 2 R available
+        //   Flametongue Kavu {3}{R}         — 4 cmc
+        //   Chain Lightning {R}             — 1 cmc instant, untargeted? NO — use
+        //                                      Seismic Assault-style instead:
+        //   Pyretic Ritual {R}              — 1 cmc untargeted instant
         // Expected totalMana = 2 (Islands) + 2 (Mountains) + 2 (Sol Ring)
         //                    + 1 (Signet net) = 7.
         Player p = newGame();
@@ -1355,11 +1360,11 @@ public class HasAvailableActionsTest extends SimulationTest {
         addCards("Mountain", 2, p);
         addCard("Sol Ring", p).setSickness(false);
         addCard("Izzet Signet", p).setSickness(false);
-        addCardToZone("Counterspell", p, ZoneType.Hand);
-        addCardToZone("Lightning Bolt", p, ZoneType.Hand);
+        addCardToZone("Brainstorm", p, ZoneType.Hand);
+        addCardToZone("Divination", p, ZoneType.Hand);
         addCardToZone("Shivan Dragon", p, ZoneType.Hand);
-        addCardToZone("Cancel", p, ZoneType.Hand);
         addCardToZone("Flametongue Kavu", p, ZoneType.Hand);
+        addCardToZone("Pyretic Ritual", p, ZoneType.Hand);
 
         ActionScan scan = ActionScan.scan(p);
         ManaBudget b = scan.getBudget();
@@ -1372,11 +1377,11 @@ public class HasAvailableActionsTest extends SimulationTest {
         AssertJUnit.assertEquals(2, b.getBucket(ManaBudget.IDX_C));
 
         java.util.Set<String> actionable = affordableCardNames(p);
-        AssertJUnit.assertTrue(actionable.contains("Counterspell"));
-        AssertJUnit.assertTrue(actionable.contains("Lightning Bolt"));
+        AssertJUnit.assertTrue(actionable.contains("Brainstorm"));
+        AssertJUnit.assertTrue(actionable.contains("Divination"));
         AssertJUnit.assertTrue(actionable.contains("Shivan Dragon"));
-        AssertJUnit.assertTrue(actionable.contains("Cancel"));
         AssertJUnit.assertTrue(actionable.contains("Flametongue Kavu"));
+        AssertJUnit.assertTrue(actionable.contains("Pyretic Ritual"));
     }
 
     @Test
@@ -1802,18 +1807,20 @@ public class HasAvailableActionsTest extends SimulationTest {
 
     @Test
     public void testFutureSightAffordableTopCard() {
-        // Future Sight on battlefield + 5 Islands + Counterspell at top of
-        // library. The player can cast Counterspell from the top via Future
-        // Sight's MayPlay. Scan should surface this as an affordable spell.
+        // Future Sight on battlefield + 5 Islands + Ponder at top of
+        // library. The player can cast Ponder from the top via Future
+        // Sight's MayPlay. Ponder is untargeted so the cast-gate
+        // pre-flight doesn't filter it out; the test is purely about
+        // external-zone reachability.
         Player p = newGame();
         addCard("Future Sight", p).setSickness(false);
         addCards("Island", 5, p);
-        putOnTopOfLibrary(p, "Counterspell"); // {U}{U}
+        putOnTopOfLibrary(p, "Ponder"); // {U}
         p.getGame().getAction().checkStateEffects(true);
         p.getGame().getAction().checkStateEffects(true);
         java.util.Set<String> actionable = affordableCardNames(p);
-        AssertJUnit.assertTrue("Counterspell from top of library should be actionable",
-                actionable.contains("Counterspell"));
+        AssertJUnit.assertTrue("Ponder from top of library should be actionable",
+                actionable.contains("Ponder"));
     }
 
     @Test
@@ -2707,6 +2714,62 @@ public class HasAvailableActionsTest extends SimulationTest {
         AssertJUnit.assertTrue(
                 "Bloodbraid Elf should be affordable with 2R floating + Mountain + Forest",
                 canAffordFromHand(p, "Bloodbraid Elf"));
+    }
+
+    // =================================================================
+    // Targeting pre-flight — mirror TargetSelection auto-abort
+    // =================================================================
+
+    @Test
+    public void testShockWithNoCreaturesNotActionable() {
+        // Shock targets "any target" (includes players), so it's always
+        // affordable AND always has targets. True negative baseline.
+        Player p = newGame();
+        addCard("Mountain", p);
+        addCardToZone("Shock", p, ZoneType.Hand);
+        AssertJUnit.assertTrue("Shock can always target a player",
+                affordableCardNames(p).contains("Shock"));
+    }
+
+    @Test
+    public void testNaturalizeNoArtifactsOrEnchantments() {
+        // Naturalize only targets artifacts/enchantments. Empty board of
+        // those → game auto-aborts the cast, so the heuristic must NOT
+        // report it as actionable.
+        Player p = newGame();
+        addCard("Forest", p);
+        addCard("Forest", p);
+        addCardToZone("Naturalize", p, ZoneType.Hand);
+        AssertJUnit.assertFalse(
+                "Naturalize should NOT be actionable with no artifacts or enchantments",
+                affordableCardNames(p).contains("Naturalize"));
+    }
+
+    @Test
+    public void testNaturalizeWithTargetIsActionable() {
+        // Same setup plus a target artifact — should now be actionable.
+        Player p = newGame();
+        addCard("Forest", p);
+        addCard("Forest", p);
+        addCard("Sol Ring", p);
+        addCardToZone("Naturalize", p, ZoneType.Hand);
+        AssertJUnit.assertTrue(
+                "Naturalize should be actionable with at least one artifact on the battlefield",
+                affordableCardNames(p).contains("Naturalize"));
+    }
+
+    @Test
+    public void testCounterspellNoStack() {
+        // Counterspell targets a spell on the stack. With an empty stack
+        // there is nothing to counter → game auto-aborts. Must not be
+        // highlighted.
+        Player p = newGame();
+        addCard("Island", p);
+        addCard("Island", p);
+        addCardToZone("Counterspell", p, ZoneType.Hand);
+        AssertJUnit.assertFalse(
+                "Counterspell should NOT be actionable with an empty stack",
+                affordableCardNames(p).contains("Counterspell"));
     }
 
     // --- Sanity canary ---

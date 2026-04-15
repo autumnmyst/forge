@@ -1566,7 +1566,7 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
 
         ManaBudget budget = scan.getBudget();
         for (SpellAbility sa : scan.getSpellsToCheck()) {
-            if (sa.isLandAbility() || (sa.canPlay() && budget.canAfford(sa, scan))) {
+            if (sa.isLandAbility() || (sa.canPlay() && budget.canAfford(sa, scan) && scan.hasLegalTargets(sa))) {
                 Card host = sa.getHostCard();
                 if (host != null) {
                     result.add(host.getView());
