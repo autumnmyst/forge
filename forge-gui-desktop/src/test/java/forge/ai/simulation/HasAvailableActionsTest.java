@@ -2827,7 +2827,9 @@ public class HasAvailableActionsTest extends SimulationTest {
         // at power 3 after some counters were added."
         //
         // With current power = 3: multiplier = 3, cap = 1 (ActivationLimit),
-        // Produced "Combo U R" → rainbow bucket += 3, total += 3.
+        // Produced "Combo U R" Amount$ X → U and R buckets each get 3
+        // (color reachability over-count; player picks one of U or R
+        // per mana). Total net capped at 3 (Amount value).
         Player p = newGame();
         Card vivi = addCard("Vivi Ornitier", p);
         vivi.setSickness(false);
@@ -2835,9 +2837,12 @@ public class HasAvailableActionsTest extends SimulationTest {
         p.getGame().getAction().checkStateEffects(true);
         ActionScan scan = ActionScan.scan(p);
         ManaBudget b = scan.getBudget();
-        AssertJUnit.assertEquals("rainbow from Combo UR via CardPower",
-                3, b.getBucket(ManaBudget.IDX_RAINBOW));
-        AssertJUnit.assertEquals("total net (Cost$ 0, gross 3)", 3, b.getTotalMana());
+        AssertJUnit.assertEquals("U bucket from Combo UR × power 3",
+                3, b.getBucket(ManaBudget.IDX_U));
+        AssertJUnit.assertEquals("R bucket from Combo UR × power 3",
+                3, b.getBucket(ManaBudget.IDX_R));
+        AssertJUnit.assertEquals("total capped at Amount (power 3), not sum of buckets",
+                3, b.getTotalMana());
     }
 
     @Test
@@ -2856,8 +2861,10 @@ public class HasAvailableActionsTest extends SimulationTest {
     @Test
     public void testViviOrnitierOncePerTurnCap() {
         // Vivi at base power 5. ActivationLimit$ 1 means cap = 1, so the
-        // contribution is one activation's worth of mana (5 rainbow), not
-        // 5 × something. Shivan Dragon (6 cmc) is NOT affordable from 5.
+        // contribution is one activation's worth of mana. Produced
+        // "Combo U R" Amount 5 → U and R buckets each = 5 (color
+        // reachability), total capped at 5.
+        // Shivan Dragon {4}{R}{R} (6 cmc) is NOT affordable from 5 total.
         Player p = newGame();
         Card vivi = addCard("Vivi Ornitier", p);
         vivi.setSickness(false);
@@ -2865,8 +2872,8 @@ public class HasAvailableActionsTest extends SimulationTest {
         p.getGame().getAction().checkStateEffects(true);
         ActionScan scan = ActionScan.scan(p);
         ManaBudget b = scan.getBudget();
-        AssertJUnit.assertEquals("5 rainbow from one activation at power 5",
-                5, b.getBucket(ManaBudget.IDX_RAINBOW));
+        AssertJUnit.assertEquals("U bucket = 5", 5, b.getBucket(ManaBudget.IDX_U));
+        AssertJUnit.assertEquals("R bucket = 5", 5, b.getBucket(ManaBudget.IDX_R));
         AssertJUnit.assertEquals(5, b.getTotalMana());
         addCardToZone("Shivan Dragon", p, ZoneType.Hand); // {4}{R}{R} = 6
         AssertJUnit.assertFalse("Shivan Dragon (6 cmc) should NOT be affordable",
@@ -3493,6 +3500,125 @@ public class HasAvailableActionsTest extends SimulationTest {
         AssertJUnit.assertFalse(
                 "Restless Spire alone can't afford its own 2-cost animate",
                 canAffordNonManaAbilityOf(p, "Restless Spire"));
+    }
+
+    // =================================================================
+    // Combo mana producers — bucket routing (not rainbow)
+    // =================================================================
+
+    @Test
+    public void testScouredBarrensDoesNotProvideGreen() {
+        // Scoured Barrens: {T}: Add {W} or {B}. Combo W B producer.
+        // Must NOT land in the RAINBOW bucket — Scoured Barrens can't
+        // produce green, so green-costing spells should see 0 G mana.
+        // Previously the combo parser wrote rainbow=1, which allowed
+        // Scoured Barrens to "pay" any color including G.
+        Player p = newGame();
+        addCard("Scoured Barrens", p).setSickness(false);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals("W bucket reachable", 1, b.getBucket(ManaBudget.IDX_W));
+        AssertJUnit.assertEquals("B bucket reachable", 1, b.getBucket(ManaBudget.IDX_B));
+        AssertJUnit.assertEquals("G bucket NOT reachable from W/B combo land",
+                0, b.getBucket(ManaBudget.IDX_G));
+        AssertJUnit.assertEquals("rainbow bucket NOT used for combo mana",
+                0, b.getBucket(ManaBudget.IDX_RAINBOW));
+        AssertJUnit.assertEquals("total caps at Amount (1), not sum of buckets",
+                1, b.getTotalMana());
+    }
+
+    @Test
+    public void testScouredBarrensCannotPayGreenSpell() {
+        // Llanowar Elves ({G}) should NOT be affordable from Scoured
+        // Barrens alone. Prior to the fix, the rainbow bucket covered G.
+        Player p = newGame();
+        addCard("Scoured Barrens", p).setSickness(false);
+        addCardToZone("Llanowar Elves", p, ZoneType.Hand);
+        AssertJUnit.assertFalse("Scoured Barrens can't pay {G}",
+                canAffordFromHand(p, "Llanowar Elves"));
+    }
+
+    @Test
+    public void testCascadeBluffsTotalCapsCorrectly() {
+        // Cascade Bluffs + Island. Cascade Bluffs has two tap-self mana
+        // abilities (same TAP exclusion group):
+        //   {T}: Add {C}                 → 1 C, net 1.
+        //   {U/R}, {T}: Add Combo U R Amount 2 → 2 mana (UU/UR/RR),
+        //                                        cost {U/R} = 1, net 1.
+        // Combo ability is cost-bearing; deferred-cost fixed-point loop
+        // admits it because the Island can pay the {U/R}. Max per card
+        // across TAP group = max(1, 1) = 1.
+        // Bucket state after commit: Island U = 1, Cascade Bluffs combo
+        // contributes U = 2 and R = 2 (color reachability over-count).
+        // No rainbow leakage. Total = 1 (Island) + 1 (Cascade max) = 2.
+        Player p = newGame();
+        addCard("Cascade Bluffs", p).setSickness(false);
+        addCard("Island", p);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals("U: 1 (Island) + 2 (combo reachability)",
+                3, b.getBucket(ManaBudget.IDX_U));
+        AssertJUnit.assertEquals("R: 2 (combo reachability)", 2, b.getBucket(ManaBudget.IDX_R));
+        AssertJUnit.assertEquals("C from basic tap", 1, b.getBucket(ManaBudget.IDX_C));
+        AssertJUnit.assertEquals("no rainbow leakage", 0, b.getBucket(ManaBudget.IDX_RAINBOW));
+        AssertJUnit.assertEquals("total: Island 1 + Cascade max(basic 1, combo 1) = 2",
+                2, b.getTotalMana());
+    }
+
+    // =================================================================
+    // Return the Favor — Spree / Charm with no valid targets
+    // =================================================================
+
+    // =================================================================
+    // Commander tax
+    // =================================================================
+
+    @Test
+    public void testCommanderTaxRaisesCostInHeuristic() {
+        // Commander in the command zone with 2 prior casts → tax = {4}.
+        // Niv-Mizzet, the Firemind ({2}{U}{U}{R}{R}) = 6 cmc. With tax 4
+        // → effective 10 cmc. With 6 mana on board should NOT be
+        // affordable.
+        Player p = newGame();
+        addCards("Island", 3, p);
+        addCards("Mountain", 3, p);
+        Card niv = addCardToZone("Niv-Mizzet, the Firemind", p, ZoneType.Command);
+        niv.setOwner(p);
+        p.addCommander(niv);
+        p.incCommanderCast(niv);
+        p.incCommanderCast(niv);
+        p.getGame().getAction().checkStateEffects(true);
+        AssertJUnit.assertFalse(
+                "Niv with {4} commander tax (10 effective cost) should NOT be affordable from 6 mana",
+                affordableCardNames(p).contains("Niv-Mizzet, the Firemind"));
+    }
+
+    @Test
+    public void testCommanderNoTaxStillAffordable() {
+        // Same commander, NO prior casts → no tax. 6 mana exactly pays 6 cmc.
+        Player p = newGame();
+        addCards("Island", 3, p);
+        addCards("Mountain", 3, p);
+        Card niv = addCardToZone("Niv-Mizzet, the Firemind", p, ZoneType.Command);
+        niv.setOwner(p);
+        p.addCommander(niv);
+        p.getGame().getAction().checkStateEffects(true);
+        AssertJUnit.assertTrue(
+                "Niv without commander tax should be affordable from 3 Islands + 3 Mountains",
+                affordableCardNames(p).contains("Niv-Mizzet, the Firemind"));
+    }
+
+    @Test
+    public void testReturnTheFavorNoValidTargetsNotActionable() {
+        // Return the Favor is a Spree spell whose sub-modes both require
+        // targets. With an empty stack, neither mode has a valid target,
+        // so the cast would auto-abort. The heuristic must not highlight
+        // it as actionable.
+        Player p = newGame();
+        addCards("Mountain", 2, p);
+        addCardToZone("Return the Favor", p, ZoneType.Hand);
+        AssertJUnit.assertFalse("Return the Favor has no legal Spree mode target",
+                affordableCardNames(p).contains("Return the Favor"));
     }
 
     // --- Sanity canary ---

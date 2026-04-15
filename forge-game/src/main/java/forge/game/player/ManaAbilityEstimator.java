@@ -786,6 +786,13 @@ final class ManaAbilityEstimator {
         int grossPerAct = 0;
         for (int v : producedPerBucket) grossPerAct += v;
         if (grossPerAct == 0) grossPerAct = 1; // safety for unrecognized strings
+        // Combo producers over-count in buckets (Scoured Barrens writes
+        // 1 to both W and B since the player picks one). Per-unit
+        // contribution is 1 (one mana unit), so cap grossPerAct at 1;
+        // the caller's `multiplier` (from Amount) scales per-activation.
+        if (mp.isComboMana()) {
+            grossPerAct = 1;
+        }
 
         // Apply precise mana modifiers (High Tide, Badgermole Cub, Mana
         // Reflection, etc.). Composition rules:
@@ -1002,14 +1009,45 @@ final class ManaAbilityEstimator {
 
         String produced;
         if (mp.isComboMana()) {
-            // Combo mana — e.g. "Combo W U" → 1 mana, choose from 2 colors.
-            // FP-safe over-count: treat as rainbow.
+            // Combo mana — e.g. Scoured Barrens' "Combo W B" → 1 mana,
+            // choose from {W, B}. Cascade Bluffs' "Combo U R" Amount 2
+            // → 2 mana, each chosen from {U, R}.
+            //
+            // We store 1 PER COMBO COLOR (per-unit contribution), not
+            // per-activation. The caller's `multiplier` (from Amount)
+            // scales to per-activation: bucketAdd = cap × Amount × 1 =
+            // Amount per color. FP-safe over-count: each color can
+            // reach Amount mana if the player commits all units to it.
+            //
+            // grossPerAct (sum of buckets) is capped at 1 downstream so
+            // the netTotal doesn't double-count (combo buckets over-count
+            // the sum, but real production is just Amount).
+            //
+            // We do NOT put combo mana into the RAINBOW bucket, because
+            // RAINBOW is spendable on any color including ones not in
+            // the combo — that would let Scoured Barrens appear to
+            // produce green, which is wrong.
             String combo = mp.getComboColors(sa);
             if (combo == null || combo.isBlank()) {
                 out[ManaBudget.RAINBOW] = 1;
                 return out;
             }
-            out[ManaBudget.RAINBOW] = 1;
+            boolean recognized = false;
+            for (String tok : combo.trim().split("\\s+")) {
+                if (tok.isEmpty()) continue;
+                switch (tok) {
+                    case "W": out[ManaBudget.W] = 1; recognized = true; break;
+                    case "U": out[ManaBudget.U] = 1; recognized = true; break;
+                    case "B": out[ManaBudget.B] = 1; recognized = true; break;
+                    case "R": out[ManaBudget.R] = 1; recognized = true; break;
+                    case "G": out[ManaBudget.G] = 1; recognized = true; break;
+                    case "C": out[ManaBudget.C] = 1; recognized = true; break;
+                    default: break;
+                }
+            }
+            if (!recognized) {
+                out[ManaBudget.RAINBOW] = 1;
+            }
             return out;
         } else {
             produced = mp.getOrigProduced();

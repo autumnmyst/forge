@@ -434,6 +434,50 @@ public final class ActionScan {
      */
     public boolean hasLegalTargets(SpellAbility sa) {
         try {
+            // Charm / Spree spells: the root SA has no direct targeting
+            // but its sub-abilities (modes) do. Mirror CharmEffect.makePossibleOptions
+            // (forge-game/src/main/java/forge/game/ability/effects/CharmEffect.java:38-45)
+            // to remove illegal modes, then check whether enough remain
+            // to meet the MinCharmNum threshold — same logic CharmEffect's
+            // makeChoices uses to return false on under-count.
+            if (sa.getApi() == forge.game.ability.ApiType.Charm) {
+                int minCharm;
+                try {
+                    String raw = sa.getParam("MinCharmNum");
+                    if (raw != null) minCharm = Integer.parseInt(raw);
+                    else minCharm = Integer.parseInt(sa.getParamOrDefault("CharmNum", "1"));
+                } catch (NumberFormatException ex) {
+                    return true;
+                }
+                if (minCharm <= 0) return true;
+                java.util.List<forge.game.spellability.AbilitySub> choices =
+                        sa.getAdditionalAbilityList("Choices");
+                if (choices == null || choices.isEmpty()) return true;
+
+                boolean needsRestore = sa.getActivatingPlayer() == null;
+                if (needsRestore) sa.setActivatingPlayer(player);
+                int legalChoices;
+                try {
+                    legalChoices = 0;
+                    for (forge.game.spellability.AbilitySub ch : choices) {
+                        if (ch == null) continue;
+                        if (ch.getActivatingPlayer() == null) {
+                            ch.setActivatingPlayer(player);
+                        }
+                        // Exact mirror of the illegal-mode predicate.
+                        if (ch.usesTargeting() && ch.getMinTargets() > 0
+                                && ch.getTargetRestrictions().getNumCandidates(ch, true) == 0) {
+                            continue; // illegal mode, removed
+                        }
+                        legalChoices++;
+                    }
+                } finally {
+                    if (needsRestore) sa.setActivatingPlayer(null);
+                }
+                if (legalChoices < minCharm) return false;
+                // At least minCharm modes are selectable — fall through
+                // to check the root SA's own targeting (usually none).
+            }
             if (!sa.usesTargeting()) return true;
             forge.game.spellability.TargetRestrictions tgt = sa.getTargetRestrictions();
             if (tgt == null) return true;

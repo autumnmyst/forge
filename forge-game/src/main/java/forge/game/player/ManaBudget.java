@@ -141,6 +141,28 @@ public final class ManaBudget {
         } catch (RuntimeException ex) {
             raiseHolder = payCosts;
         }
+        // Commander tax: when casting a commander from the command zone,
+        // the cost is increased by {2} for each time it was previously
+        // cast from the command zone this game. Mirror of the inline
+        // block in CostAdjustment.adjust() (forge-game/src/main/java/
+        // forge/game/cost/CostAdjustment.java:56-63). At pre-cast time
+        // host.getCastFrom() is null, so we key off "host is commander
+        // AND currently in the command zone" instead.
+        if (sa.isSpell() && sa.getHostCard() != null
+                && sa.getHostCard().isCommander()
+                && sa.getHostCard().getZone() != null
+                && sa.getHostCard().getZone().getZoneType()
+                        == forge.game.zone.ZoneType.Command) {
+            forge.game.player.Player owner = sa.getHostCard().getOwner();
+            if (owner != null) {
+                int casts = owner.getCommanderCast(sa.getHostCard());
+                if (casts > 0) {
+                    try {
+                        raiseHolder.add(new Cost(ManaCost.get(2 * casts), false));
+                    } catch (Throwable ignored) {}
+                }
+            }
+        }
         ManaCostBeingPaid working = new ManaCostBeingPaid(baseCost);
         boolean needsRestore = sa.getActivatingPlayer() == null;
         if (needsRestore) sa.setActivatingPlayer(scan.getPlayer());
