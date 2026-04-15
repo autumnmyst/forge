@@ -1654,7 +1654,30 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
                 player.getName(), getGame().getPhaseHandler().getPhase(), getGame().isGameOver());
         final MagicStack stack = getGame().getStack();
 
-        if (FModel.getPreferences().getPrefBoolean(FPref.YIELD_EXPERIMENTAL_OPTIONS) && FModel.getPreferences().getPrefBoolean(FPref.YIELD_AUTO_PASS_NO_ACTIONS)) {
+        // Cheap early-skip for APINA: if the player is already committed
+        // to auto-passing this priority window for a non-APINA reason
+        // (phase is on the skip list, stack-top ability is set to
+        // auto-yield), don't waste time running the ActionScan heuristic
+        // — the result would never be consulted because the player has
+        // already decided to pass regardless. Falls through to run the
+        // scan normally when the skip isn't pre-decided.
+        boolean preDecidedSkip = false;
+        if (stack.isEmpty()) {
+            if (getGui().isUiSetToSkipPhase(getGame().getPhaseHandler().getPlayerTurn().getView(),
+                    getGame().getPhaseHandler().getPhase())) {
+                preDecidedSkip = true;
+            }
+        } else {
+            SpellAbility topAbility = stack.peekAbility();
+            if (topAbility != null && topAbility.isAbility()
+                    && getGui().shouldAutoYield(topAbility.yieldKey())) {
+                preDecidedSkip = true;
+            }
+        }
+
+        if (!preDecidedSkip
+                && FModel.getPreferences().getPrefBoolean(FPref.YIELD_EXPERIMENTAL_OPTIONS)
+                && FModel.getPreferences().getPrefBoolean(FPref.YIELD_AUTO_PASS_NO_ACTIONS)) {
             getPlayer().getView().updateHasAvailableActions(getPlayer());
         }
 
