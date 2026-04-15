@@ -1513,6 +1513,48 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
         getGui().updateAutoPassPrompt();
     }
 
+    private static final ZoneType[] ACTIONABLE_ZONES = new ZoneType[] {
+        ZoneType.Hand, ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Exile, ZoneType.Command
+    };
+
+    /**
+     * Collect the set of cards the player could act on right now. Drives the
+     * light-blue "actionable" outline. When {@code paymentMode} is true (we're
+     * inside a cost payment), only mana abilities qualify — {@link SpellAbility#canPlay()}
+     * does not consult {@code costPaymentStack}, so the narrowing is enforced here.
+     */
+    public void pushActionableCards(boolean paymentMode) {
+        final Set<CardView> result = Sets.newHashSet();
+        for (ZoneType zone : ACTIONABLE_ZONES) {
+            for (Card c : player.getCardsIn(zone)) {
+                if (cardHasActionableSa(c, paymentMode)) {
+                    result.add(c.getView());
+                }
+            }
+        }
+        // Opponent-controlled cards can occasionally be actionable (steal effects, etc.).
+        // Scan the shared battlefield for anything not already captured.
+        for (Card c : getGame().getCardsIn(ZoneType.Battlefield)) {
+            if (c.getController() == player) continue;
+            if (cardHasActionableSa(c, paymentMode)) {
+                result.add(c.getView());
+            }
+        }
+        getGui().setWeaklySelectable(result);
+    }
+
+    private boolean cardHasActionableSa(Card c, boolean paymentMode) {
+        for (SpellAbility sa : c.getAllPossibleAbilities(player, true)) {
+            if (paymentMode && !sa.isManaAbility()) continue;
+            if (sa.canPlay()) return true;
+        }
+        return false;
+    }
+
+    public void clearActionableCards() {
+        getGui().clearWeaklySelectable();
+    }
+
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
         netLog.trace("ENTRY for player {}, phase={}, isGameOver={}",

@@ -249,6 +249,10 @@ public interface IGuiGame {
 
     boolean isSelecting();
 
+    void setWeaklySelectable(final Iterable<CardView> cards);
+
+    void clearWeaklySelectable();
+
     boolean isGamePaused();
 
     void setGamePause(boolean pause);

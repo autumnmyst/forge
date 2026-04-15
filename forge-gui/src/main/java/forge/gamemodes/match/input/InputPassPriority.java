@@ -66,6 +66,11 @@ public class InputPassPriority extends InputSyncronizedBase {
     }
 
     @Override
+    protected void onStop() {
+        getController().clearActionableCards();
+    }
+
+    @Override
     public void showAndWait() {
         final FServerManager server = FServerManager.getInstance();
         final AfkTimeout timeout = server != null
@@ -81,6 +86,7 @@ public class InputPassPriority extends InputSyncronizedBase {
     /** {@inheritDoc} */
     @Override
     public final void showMessage() {
+        getController().pushActionableCards(false);
         // Check if experimental yield features are enabled and show smart suggestions
         // Only show suggestions if not already yielding
         // Check if yield just ended and suppression is enabled

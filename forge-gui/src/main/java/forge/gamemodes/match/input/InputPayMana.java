@@ -63,6 +63,7 @@ public abstract class InputPayMana extends InputSyncronizedBase {
 
     @Override
     protected void onStop() {
+        getController().clearActionableCards();
         if (!isFinished()) {
             // Clear current Mana cost being paid for SA
             saPaidFor.setManaCostBeingPaid(null);
@@ -423,6 +424,7 @@ public abstract class InputPayMana extends InputSyncronizedBase {
     @Override
     public void showMessage() {
         if (isFinished()) { return; }
+        getController().pushActionableCards(true);
         updateButtons();
         onStateChanged();
     }

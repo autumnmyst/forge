@@ -68,6 +68,7 @@ public class InputAttack extends InputSyncronizedBase {
 
     @Override
     public final void showMessage() {
+        getController().clearActionableCards();
         setCurrentDefender(defenders.getFirst());
 
         if (currentDefender == null) {
