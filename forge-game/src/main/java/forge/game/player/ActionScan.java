@@ -241,6 +241,32 @@ public final class ActionScan {
     final Map<ExclusionKey, Integer> exclusionMaxNetByKey = new HashMap<>();
     final java.util.Set<ExclusionKey> exclusionUnboundedKeys = new java.util.HashSet<>();
 
+    /** Running per-card contribution to {@code budget.totalMana} from the
+     *  exclusion-group formula. Populated by {@link #commitCardContribution}
+     *  during the Pass 2 commit step; re-read and updated in-place by the
+     *  fixed-point loop when a deferred cost-bearing OTMA gets admitted. */
+    final Map<Card, Integer> committedCardTotals = new HashMap<>();
+    /** Cards whose contribution has already flipped to unbounded in a prior
+     *  commit pass. Prevents the fixed-point loop from accidentally touching
+     *  {@code budget.totalMana} for a card that's already been folded into
+     *  {@code budget.totalUnbounded}. */
+    final java.util.Set<Card> unboundedCards = new java.util.HashSet<>();
+
+    /** Deferred cost-bearing OTMAs staged during Pass 2. Lazy-initialized so
+     *  boards without any cost-bearing mana abilities pay zero overhead. The
+     *  fixed-point loop in {@link #scan} admits records whose activation
+     *  cost is covered by the rest of the budget (excluding the card's own
+     *  same-group contribution). See {@link ManaAbilityEstimator.PendingCostOtma}. */
+    List<ManaAbilityEstimator.PendingCostOtma> pendingCostOtmas;
+
+    /** Append a deferred cost-bearing OTMA. Lazy-inits the list so the
+     *  common "no cost-bearing abilities on the board" case allocates
+     *  nothing. */
+    void addPendingCostOtma(ManaAbilityEstimator.PendingCostOtma rec) {
+        if (pendingCostOtmas == null) pendingCostOtmas = new ArrayList<>();
+        pendingCostOtmas.add(rec);
+    }
+
     // Back-compat alias for the old field name — tap-self is the most
     // common exclusion group and some call sites still reference it.
     // (Kept so external callers compile; new code should use the keyed
@@ -420,69 +446,16 @@ public final class ActionScan {
             ManaAbilityEstimator.estimate(ma, s, s.budget);
         }
 
-        // Commit per-card mutual-exclusion contributions. For each card,
-        // compute the best reachable total given that the card's mana
-        // abilities compete for tap-self and sac-self resources:
-        //
-        //   contribution = max(COMBO, TAP + SAC) + EXILE
-        //
-        // where TAP / SAC / COMBO are the max nets within each group on
-        // that card, and EXILE is independent (different zone). The
-        // formula reflects that:
-        //   - A combined {T},Sac ability destroys the card, locking out
-        //     everything else; its contribution alone is the best you get
-        //     from that branch.
-        //   - Tap-only + sac-only abilities CAN both fire (tap first, sac
-        //     second), so their contributions sum.
-        //   - The player picks whichever branch yields more mana.
-        java.util.Map<Card, java.util.EnumMap<ExclusionGroup, Integer>> byCard =
-                new java.util.HashMap<>();
-        java.util.Map<Card, java.util.EnumSet<ExclusionGroup>> unboundedByCard =
-                new java.util.HashMap<>();
-        for (Map.Entry<ExclusionKey, Integer> e : s.exclusionMaxNetByKey.entrySet()) {
-            byCard.computeIfAbsent(e.getKey().card,
-                    k -> new java.util.EnumMap<>(ExclusionGroup.class))
-                    .put(e.getKey().group, e.getValue());
-        }
-        for (ExclusionKey k : s.exclusionUnboundedKeys) {
-            unboundedByCard.computeIfAbsent(k.card,
-                    c -> java.util.EnumSet.noneOf(ExclusionGroup.class)).add(k.group);
-        }
-        java.util.Set<Card> allCards = new java.util.HashSet<>(byCard.keySet());
-        allCards.addAll(unboundedByCard.keySet());
+        // Commit per-card mutual-exclusion contributions via
+        // commitCardContribution(). The helper both updates budget.totalMana
+        // and stores the card's running contribution in committedCardTotals
+        // so the fixed-point loop below can re-commit a card after admitting
+        // a deferred cost-bearing OTMA (via delta math: new - old).
+        java.util.Set<Card> allCards = new java.util.HashSet<>();
+        for (ExclusionKey k : s.exclusionMaxNetByKey.keySet()) allCards.add(k.card);
+        for (ExclusionKey k : s.exclusionUnboundedKeys) allCards.add(k.card);
         for (Card card : allCards) {
-            java.util.EnumMap<ExclusionGroup, Integer> perGroup =
-                    byCard.getOrDefault(card, new java.util.EnumMap<>(ExclusionGroup.class));
-            java.util.EnumSet<ExclusionGroup> unb = unboundedByCard.getOrDefault(card,
-                    java.util.EnumSet.noneOf(ExclusionGroup.class));
-
-            int tapOnly = perGroup.getOrDefault(ExclusionGroup.TAP, 0);
-            int sacOnly = perGroup.getOrDefault(ExclusionGroup.SAC, 0);
-            int combo = perGroup.getOrDefault(ExclusionGroup.TAP_SAC_COMBO, 0);
-            int exile = perGroup.getOrDefault(ExclusionGroup.EXILE, 0);
-
-            // Tap/sac branch: any unbounded contributor makes the whole
-            // branch unbounded.
-            if (unb.contains(ExclusionGroup.TAP)
-                    || unb.contains(ExclusionGroup.SAC)
-                    || unb.contains(ExclusionGroup.TAP_SAC_COMBO)) {
-                s.budget.totalUnbounded = true;
-            } else {
-                int tapSacBest = Math.max(combo, tapOnly + sacOnly);
-                if (tapSacBest > 0) {
-                    long sum = (long) s.budget.totalMana + (long) tapSacBest;
-                    s.budget.totalMana = sum >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) sum;
-                }
-            }
-
-            // Exile-from-hand is independent — different zone, no overlap
-            // with the tap/sac resources.
-            if (unb.contains(ExclusionGroup.EXILE)) {
-                s.budget.totalUnbounded = true;
-            } else if (exile > 0) {
-                long sum = (long) s.budget.totalMana + (long) exile;
-                s.budget.totalMana = sum >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) sum;
-            }
+            s.commitCardContribution(card);
         }
         // Legacy: also commit anything that got routed through the old
         // tap-self-only map (retained for any call sites not yet migrated).
@@ -495,10 +468,155 @@ public final class ActionScan {
             s.budget.totalMana = sum >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) sum;
         }
 
+        // Fixed-point loop over deferred cost-bearing OTMAs. Skipped
+        // entirely when pendingCostOtmas is null/empty — the common case
+        // pays zero overhead. See the comment block on PendingCostOtma.
+        s.admitPendingCostOtmas();
+
         // Phase 5 post-processing (multiplier promotion, color-converting RMA fixed-point).
         s.postProcess();
 
         return s;
+    }
+
+    /**
+     * Re-compute and commit a card's contribution to {@code budget.totalMana}
+     * using the exclusion-group formula
+     * {@code max(COMBO, TAP + SAC) + EXILE} and record it in
+     * {@link #committedCardTotals} for delta-based re-commit later.
+     *
+     * Unbounded handling: if any relevant exclusion group has been flagged
+     * unbounded for this card, set {@code budget.totalUnbounded} and mark
+     * the card in {@link #unboundedCards}; subsequent calls for the same
+     * card become no-ops (a card that's gone unbounded never comes back).
+     */
+    void commitCardContribution(Card card) {
+        if (unboundedCards.contains(card)) return;
+
+        int tapOnly = 0, sacOnly = 0, combo = 0, exile = 0;
+        Integer v;
+        v = exclusionMaxNetByKey.get(new ExclusionKey(card, ExclusionGroup.TAP));
+        if (v != null) tapOnly = v;
+        v = exclusionMaxNetByKey.get(new ExclusionKey(card, ExclusionGroup.SAC));
+        if (v != null) sacOnly = v;
+        v = exclusionMaxNetByKey.get(new ExclusionKey(card, ExclusionGroup.TAP_SAC_COMBO));
+        if (v != null) combo = v;
+        v = exclusionMaxNetByKey.get(new ExclusionKey(card, ExclusionGroup.EXILE));
+        if (v != null) exile = v;
+
+        boolean tapSacBranchUnbounded =
+                exclusionUnboundedKeys.contains(new ExclusionKey(card, ExclusionGroup.TAP))
+                || exclusionUnboundedKeys.contains(new ExclusionKey(card, ExclusionGroup.SAC))
+                || exclusionUnboundedKeys.contains(new ExclusionKey(card, ExclusionGroup.TAP_SAC_COMBO));
+        boolean exileUnbounded =
+                exclusionUnboundedKeys.contains(new ExclusionKey(card, ExclusionGroup.EXILE));
+
+        if (tapSacBranchUnbounded || exileUnbounded) {
+            budget.totalUnbounded = true;
+            unboundedCards.add(card);
+            // Leave committedCardTotals alone — any prior finite contribution
+            // stays folded in; flipping the unbounded flag subsumes it. No
+            // delta subtraction because totalMana never had to "undo" a
+            // bounded contribution.
+            return;
+        }
+
+        int tapSacBest = Math.max(combo, tapOnly + sacOnly);
+        int contribution = tapSacBest + exile;
+        int previous = committedCardTotals.getOrDefault(card, 0);
+        int delta = contribution - previous;
+        if (delta != 0) {
+            long sum = (long) budget.totalMana + (long) delta;
+            if (sum >= Integer.MAX_VALUE) {
+                budget.totalMana = Integer.MAX_VALUE;
+            } else if (sum < 0) {
+                // Should never happen — contributions are monotone non-decreasing
+                // within a single card — but clamp defensively.
+                budget.totalMana = 0;
+            } else {
+                budget.totalMana = (int) sum;
+            }
+        }
+        committedCardTotals.put(card, contribution);
+    }
+
+    /**
+     * Fixed-point loop over {@link #pendingCostOtmas}. Each outer iteration
+     * walks the list once, admitting every record whose activation mana
+     * cost is covered by the current {@code budget.totalMana} minus the
+     * card's own same-group contribution. Admitted records:
+     *  - fold their bucket contribution via the captured commit closure,
+     *  - update the exclusion tracker,
+     *  - trigger a {@link #commitCardContribution} re-commit on their card.
+     *
+     * Terminates when a pass admits nothing (layers exhausted). Leftover
+     * records are truly unpayable and dropped silently — they contribute
+     * nothing to the budget. Zero overhead when no deferred records exist.
+     */
+    void admitPendingCostOtmas() {
+        if (pendingCostOtmas == null || pendingCostOtmas.isEmpty()) return;
+
+        boolean progress;
+        do {
+            progress = false;
+            java.util.Iterator<ManaAbilityEstimator.PendingCostOtma> it = pendingCostOtmas.iterator();
+            while (it.hasNext()) {
+                ManaAbilityEstimator.PendingCostOtma rec = it.next();
+                int sameSelf = 0;
+                if (rec.hostCard != null && rec.exclusionGroup != null) {
+                    ExclusionKey key = new ExclusionKey(rec.hostCard, rec.exclusionGroup);
+                    Integer cur = exclusionMaxNetByKey.get(key);
+                    if (cur != null) sameSelf = cur;
+                    if (exclusionUnboundedKeys.contains(key)) {
+                        // Card's same group already unbounded — "rest of
+                        // budget" relative to this card is irrelevant.
+                        // Admit regardless.
+                        admitPending(rec);
+                        it.remove();
+                        progress = true;
+                        continue;
+                    }
+                }
+                long availableForCost = budget.totalUnbounded
+                        ? Long.MAX_VALUE
+                        : ((long) budget.totalMana - (long) sameSelf);
+                if (availableForCost >= rec.manaCostPerActivation) {
+                    admitPending(rec);
+                    it.remove();
+                    progress = true;
+                }
+            }
+        } while (progress);
+        // Anything remaining is truly unpayable — drop silently.
+        pendingCostOtmas.clear();
+    }
+
+    /** Apply a deferred cost-bearing OTMA's contribution: buckets first
+     *  (via the captured closure), then exclusion tracker update, then
+     *  per-card re-commit via delta math. */
+    private void admitPending(ManaAbilityEstimator.PendingCostOtma rec) {
+        if (rec.commitBuckets != null) rec.commitBuckets.run();
+
+        if (rec.hostCard != null && rec.exclusionGroup != null) {
+            ExclusionKey key = new ExclusionKey(rec.hostCard, rec.exclusionGroup);
+            if (rec.unbounded) {
+                exclusionUnboundedKeys.add(key);
+            } else if (rec.netTotal > 0) {
+                Integer cur = exclusionMaxNetByKey.get(key);
+                if (cur == null || rec.netTotal > cur) {
+                    exclusionMaxNetByKey.put(key, rec.netTotal);
+                }
+            }
+            commitCardContribution(rec.hostCard);
+        } else {
+            // No exclusion group — direct total add (independent source).
+            if (rec.unbounded) {
+                budget.totalUnbounded = true;
+            } else if (rec.netTotal > 0) {
+                long sum = (long) budget.totalMana + (long) rec.netTotal;
+                budget.totalMana = sum >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) sum;
+            }
+        }
     }
 
     private void postProcess() {

@@ -44,6 +44,47 @@ final class ManaAbilityEstimator {
 
     private ManaAbilityEstimator() {}
 
+    /**
+     * A deferred cost-bearing OTMA. Built during Pass 2 instead of being
+     * folded immediately into the budget, then admitted (or dropped) by
+     * the fixed-point loop in {@link ActionScan#admitPendingCostOtmas}.
+     *
+     * The contribution snapshot lives in two parts:
+     *  - {@code commitBuckets}: closure that applies the per-color bucket
+     *    deltas. Runs unconditionally on admission. Bucket over-count is
+     *    safe so we don't try to re-validate at admit time.
+     *  - {@code netTotal} / {@code unbounded}: the totalMana contribution.
+     *    Routed through the exclusion tracker via the recorded
+     *    {@code (hostCard, exclusionGroup)} pair, then re-committed via
+     *    {@link ActionScan#commitCardContribution} so the per-card formula
+     *    {@code max(combo, tap+sac) + exile} stays correct.
+     *
+     * Threshold check: the loop admits a record iff
+     * {@code budget.totalMana - sameSelf >= manaCostPerActivation}
+     * where {@code sameSelf} is the card's current contribution in the
+     * same exclusion group (because the cost can't be paid out of mana
+     * the activation itself would consume).
+     */
+    static final class PendingCostOtma {
+        final Card hostCard;
+        final ActionScan.ExclusionGroup exclusionGroup;
+        final int manaCostPerActivation;
+        final int netTotal;
+        final boolean unbounded;
+        final Runnable commitBuckets;
+
+        PendingCostOtma(Card hostCard, ActionScan.ExclusionGroup exclusionGroup,
+                        int manaCostPerActivation, int netTotal, boolean unbounded,
+                        Runnable commitBuckets) {
+            this.hostCard = hostCard;
+            this.exclusionGroup = exclusionGroup;
+            this.manaCostPerActivation = manaCostPerActivation;
+            this.netTotal = netTotal;
+            this.unbounded = unbounded;
+            this.commitBuckets = commitBuckets;
+        }
+    }
+
     // ---------------------------------------------------------------
     // Special pattern handlers — precise bounds for known safe wrappers
     // that would otherwise trigger the Parley-style structural bailout.
@@ -86,25 +127,47 @@ final class ManaAbilityEstimator {
         int maxDev = 0;
         for (int i = 0; i < 5; i++) {
             int dev = devotion[i];
-            if (dev <= 0) continue;
-            long sum = (long) budget.perColor[i] + (long) dev;
-            budget.perColor[i] = sum >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) sum;
             if (dev > maxDev) maxDev = dev;
         }
         int manaCost = activationManaCost(sa);
         int netPerAct = Math.max(0, maxDev - manaCost);
         int net = saturatingMul(cap, netPerAct);
-        // Nykthos's ChooseColor ability is tap-self — route through the
-        // per-card tracker so it groups with the basic {T}: Add {C} ability
-        // for max-not-sum total accounting.
         Card host = sa.getHostCard();
-        if (host != null && net > 0) {
-            ActionScan.ExclusionKey key = new ActionScan.ExclusionKey(
-                    host, ActionScan.ExclusionGroup.TAP);
-            Integer current = scan.exclusionMaxNetByKey.get(key);
-            if (current == null || net > current) {
-                scan.exclusionMaxNetByKey.put(key, net);
+        if (host == null || net <= 0) return;
+
+        // Closure that folds the devotion-per-color contributions into the
+        // budget. Captured for deferred admission so we don't fold buckets
+        // until we know Nykthos's {2} cost is payable.
+        final int[] devSnapshot = new int[] { devotion[0], devotion[1], devotion[2], devotion[3], devotion[4] };
+        Runnable commitBuckets = () -> {
+            for (int i = 0; i < 5; i++) {
+                int dev = devSnapshot[i];
+                if (dev <= 0) continue;
+                long sum = (long) budget.perColor[i] + (long) dev;
+                budget.perColor[i] = sum >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) sum;
             }
+        };
+
+        if (manaCost > 0) {
+            // Defer to the fixed-point loop. Nykthos's {2} activation cost
+            // can't be paid by Nykthos itself (it's the activating card),
+            // and its TAP-group sameSelf may already include a basic
+            // {T}: Add {C} ability if Nykthos has one. The loop checks
+            // `budget.totalMana - sameSelf >= 2` before admitting.
+            scan.addPendingCostOtma(new PendingCostOtma(
+                    host, ActionScan.ExclusionGroup.TAP,
+                    manaCost, net, false, commitBuckets));
+            return;
+        }
+
+        // Cost-free path (defensive — Nykthos always has a cost, but
+        // hand-built test SAs might not).
+        commitBuckets.run();
+        ActionScan.ExclusionKey key = new ActionScan.ExclusionKey(
+                host, ActionScan.ExclusionGroup.TAP);
+        Integer current = scan.exclusionMaxNetByKey.get(key);
+        if (current == null || net > current) {
+            scan.exclusionMaxNetByKey.put(key, net);
         }
     }
 
@@ -677,6 +740,59 @@ final class ManaAbilityEstimator {
         // sum is deliberately skipped so we don't double-count.
         ActionScan.ExclusionGroup excl = scanForTapSelfRouting == null
                 ? null : exclusionGroupOf(sa);
+
+        // Cost-bearing OTMAs (manaCostPerActivation > 0): defer to the
+        // fixed-point loop in ActionScan.scan(). The loop will admit this
+        // record only if the rest of the budget (excluding this card's
+        // same-group contribution) can pay the activation cost — fixing
+        // the Three Tree City over-count where TTC alone advertised a
+        // rainbow ability whose 2-cost was unpayable.
+        //
+        // Bucket fold is moved into a closure so admission can apply it
+        // cleanly. We undo the bucket fold above and re-do it inside the
+        // closure via a captured snapshot — simpler than refactoring the
+        // whole bucket loop.
+        if (manaCostPerActivation > 0 && scanForTapSelfRouting != null) {
+            // Undo the bucket writes we did above so they only land on
+            // admission.
+            for (int i = 0; i < ManaBudget.NUM_BUCKETS; i++) {
+                int countPerAct = producedPerBucket[i];
+                if (countPerAct <= 0) continue;
+                if (unbounded) {
+                    // The corresponding bucket was set to true above; we
+                    // can't safely "unset" because another ability may
+                    // also have flipped it. Accept the FP — it's only one
+                    // bit of bucket overcount, and the total still gets
+                    // properly gated below.
+                    continue;
+                }
+                int bucketAdd = saturatingMul(saturatingMul(cap, multiplier), countPerAct);
+                long restored = (long) targetPerColor[i] - (long) bucketAdd;
+                targetPerColor[i] = restored < 0 ? 0 : (int) restored;
+            }
+
+            // Capture for closure.
+            final int[] targetPerColorRef = targetPerColor;
+            final boolean[] targetUnboundedRef = targetUnbounded;
+            final int[] producedSnapshot = producedPerBucket;
+            final int capF = cap;
+            final int multF = multiplier;
+            final boolean unboundedF = unbounded;
+            Runnable commitBuckets = () -> {
+                for (int i = 0; i < ManaBudget.NUM_BUCKETS; i++) {
+                    int countPerAct = producedSnapshot[i];
+                    if (countPerAct <= 0) continue;
+                    int bucketAdd = unboundedF ? Integer.MAX_VALUE
+                            : saturatingMul(saturatingMul(capF, multF), countPerAct);
+                    applyToColor(targetPerColorRef, targetUnboundedRef, i, bucketAdd, unboundedF);
+                }
+            };
+            scanForTapSelfRouting.addPendingCostOtma(
+                    new PendingCostOtma(sa.getHostCard(), excl,
+                            manaCostPerActivation, netTotal, unbounded, commitBuckets));
+            return;
+        }
+
         if (excl != null && sa.getHostCard() != null) {
             Card host = sa.getHostCard();
             ActionScan.ExclusionKey key = new ActionScan.ExclusionKey(host, excl);

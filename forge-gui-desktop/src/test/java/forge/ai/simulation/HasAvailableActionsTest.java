@@ -944,16 +944,38 @@ public class HasAvailableActionsTest extends SimulationTest {
 
     @Test
     public void testSignetBucketDistribution() {
-        // Izzet Signet alone: per-color buckets show 1 U and 1 R (gross
-        // color reachability). Total net = 1 (gross 2 − cost 1).
+        // Izzet Signet + 1 Forest: Forest provides 1 cost-free mana, which
+        // makes Signet's {1} activation cost payable. Signet then admits
+        // gross 1 U + 1 R buckets, net 1 to total. Plus Forest's own G=1.
+        // Total = 2 (1 Forest + 1 Signet net).
+        //
+        // Without the Forest, Signet alone has no mana source to pay its
+        // {1} activation cost — the deferred-cost-OTMA fixed-point loop
+        // would correctly drop it. This test verifies the chain admit.
         Player p = newGame();
+        addCard("Forest", p);
         addCard("Izzet Signet", p).setSickness(false);
         ActionScan scan = ActionScan.scan(p);
         ManaBudget b = scan.getBudget();
         AssertJUnit.assertEquals(1, b.getBucket(ManaBudget.IDX_U));
         AssertJUnit.assertEquals(1, b.getBucket(ManaBudget.IDX_R));
+        AssertJUnit.assertEquals(1, b.getBucket(ManaBudget.IDX_G));
         AssertJUnit.assertEquals(0, b.getBucket(ManaBudget.IDX_RAINBOW));
-        AssertJUnit.assertEquals(1, b.getTotalMana());
+        AssertJUnit.assertEquals(2, b.getTotalMana());
+    }
+
+    @Test
+    public void testSignetAloneNotPayable() {
+        // Izzet Signet alone — no other mana source. Signet's {1} activation
+        // cost can't be paid by anything, so the deferred-cost-OTMA loop
+        // drops it entirely. Bucket and total stay at 0.
+        Player p = newGame();
+        addCard("Izzet Signet", p).setSickness(false);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals(0, b.getBucket(ManaBudget.IDX_U));
+        AssertJUnit.assertEquals(0, b.getBucket(ManaBudget.IDX_R));
+        AssertJUnit.assertEquals(0, b.getTotalMana());
     }
 
     @Test
@@ -1151,24 +1173,36 @@ public class HasAvailableActionsTest extends SimulationTest {
     @Test
     public void testBloodCelebrantPayLifeCapped() {
         // Blood Celebrant: {B}, Pay 1 life: Add one mana of any color.
-        // No CostTap — the cap comes from the PayLife cost part.
-        // Starting life 20, Pay 1 life → cap = 20. Each activation is net 0
-        // (pay {B}, get 1 rainbow), so totalMana stays 0.
+        // Needs a {B} source to pay activation cost — without one, the
+        // deferred-cost loop drops it. Add a Swamp so the cost is payable.
+        // Starting life 20 → life cap = 20. Rainbow bucket = 20 (gross),
+        // total = 1 (Swamp) + 0 (Celebrant net per activation = 1−1).
         Player p = newGame();
+        addCard("Swamp", p);
         addCard("Blood Celebrant", p).setSickness(false);
         ActionScan scan = ActionScan.scan(p);
         ManaBudget b = scan.getBudget();
-        // Rainbow bucket should get 20 gross mana (20 activations × 1 rainbow).
         AssertJUnit.assertEquals(20, b.getBucket(ManaBudget.IDX_RAINBOW));
-        // But total is 0 because each activation consumes its own {B}.
-        AssertJUnit.assertEquals(0, b.getTotalMana());
+        AssertJUnit.assertEquals(1, b.getTotalMana());
+    }
+
+    @Test
+    public void testBloodCelebrantAloneNotPayable() {
+        // Blood Celebrant with no other mana source — can't pay {B}, so
+        // the deferred-cost loop drops it. Rainbow stays 0.
+        Player p = newGame();
+        addCard("Blood Celebrant", p).setSickness(false);
+        ActionScan scan = ActionScan.scan(p);
+        AssertJUnit.assertEquals(0, scan.getBudget().getBucket(ManaBudget.IDX_RAINBOW));
+        AssertJUnit.assertEquals(0, scan.getBudget().getTotalMana());
     }
 
     @Test
     public void testBloodCelebrantLowLifeCap() {
-        // Set life to 3 → cap = 3 → rainbow = 3.
+        // Life 3 → life cap = 3 → rainbow = 3 (with a Swamp to pay {B}).
         Player p = newGame();
         p.setLife(3, null);
+        addCard("Swamp", p);
         addCard("Blood Celebrant", p).setSickness(false);
         ActionScan scan = ActionScan.scan(p);
         AssertJUnit.assertEquals(3, scan.getBudget().getBucket(ManaBudget.IDX_RAINBOW));
@@ -2359,31 +2393,46 @@ public class HasAvailableActionsTest extends SimulationTest {
 
     @Test
     public void testThreeTreeCityWithCreaturesBoundsByCreatureCount() {
-        // Three Tree City + 3 Grizzly Bears. creatureCount = 3. The
-        // classifier maps Count$Valid Creature.ChosenType+YouCtrl to
-        // creatureCount as an FN-safe over-count. Second ability cap
-        // × multiplier × grossPerAct = 1 × 3 × 1 = 3 rainbow per activation.
+        // Three Tree City + 3 Grizzly Bears + 2 Plains. The Plains provide
+        // the cost-free mana that makes TTC's {2}{T} advanced ability
+        // payable: baseline = 2 (Plains) + 1 (TTC basic) = 3, sameSelf for
+        // TTC TAP = 1, available = 2 ≥ 2 (cost), admit.
         //
-        // Net total: gross 3 - cost 2 = 1 per activation.
-        // Bucket rainbow += 3, total += 1.
-        // Plus first ability: C += 1, total += 1.
+        // Bucket rainbow += 3 (cap × creatureCount × 1 grossPerAct).
+        // C += 1 (TTC basic). W += 2 (Plains).
+        // Total: 2 (Plains) + max(basic_net 1, advanced_net 1) = 3.
+        //   advanced_net = gross 3 - cost 2 = 1.
+        Player p = newGame();
+        addCards("Plains", 2, p);
+        addCard("Three Tree City", p);
+        addCards("Grizzly Bears", 3, p);
+        for (Card c : p.getCardsIn(ZoneType.Battlefield)) c.setSickness(false);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals(3, b.getBucket(ManaBudget.IDX_RAINBOW));
+        AssertJUnit.assertEquals(1, b.getBucket(ManaBudget.IDX_C));
+        AssertJUnit.assertEquals(2, b.getBucket(ManaBudget.IDX_W));
+        AssertJUnit.assertEquals(3, b.getTotalMana());
+        AssertJUnit.assertFalse("total should NOT be unbounded",
+                b.isTotalUnbounded());
+    }
+
+    @Test
+    public void testThreeTreeCityWithCreaturesNoOtherManaDoesNotAdvertiseRainbow() {
+        // Same as above but WITHOUT the Plains. TTC advanced ability needs
+        // 2 mana to activate, but only TTC basic (1 C) is available, and
+        // that's the same-card same-group resource. So available = 1 - 1 = 0
+        // < 2. The deferred loop drops TTC advanced — rainbow bucket stays 0.
         Player p = newGame();
         addCard("Three Tree City", p);
         addCards("Grizzly Bears", 3, p);
         for (Card c : p.getCardsIn(ZoneType.Battlefield)) c.setSickness(false);
         ActionScan scan = ActionScan.scan(p);
         ManaBudget b = scan.getBudget();
-        // Rainbow bucket: 3 (second ability's bounded output — buckets still
-        // over-count since they track color reachability, not net mana).
-        AssertJUnit.assertEquals(3, b.getBucket(ManaBudget.IDX_RAINBOW));
-        // C bucket: 1 (first ability).
+        AssertJUnit.assertEquals("rainbow should be 0 — TTC advanced unpayable",
+                0, b.getBucket(ManaBudget.IDX_RAINBOW));
         AssertJUnit.assertEquals(1, b.getBucket(ManaBudget.IDX_C));
-        // Total: max(1 first-ability-net, 1 second-ability-net) = 1. The
-        // two abilities share CostTap on the same card, so only one can
-        // fire per turn. Max, not sum.
         AssertJUnit.assertEquals(1, b.getTotalMana());
-        AssertJUnit.assertFalse("total should NOT be unbounded",
-                b.isTotalUnbounded());
     }
 
     @Test
@@ -2438,9 +2487,11 @@ public class HasAvailableActionsTest extends SimulationTest {
 
     @Test
     public void testThreeTreeCityCreaturesAllowCheapRainbowSpell() {
-        // Three Tree City + 3 Bears. Rainbow bucket = 3, total = 2.
-        // Hand: Lightning Bolt {R} = 1 mana, payable from rainbow.
+        // Three Tree City + 3 Bears + 2 Plains. The Plains make the
+        // {2}{T} advanced ability payable; rainbow bucket fills, total = 3.
+        // Lightning Bolt {R} payable via R from rainbow.
         Player p = newGame();
+        addCards("Plains", 2, p);
         addCard("Three Tree City", p);
         addCards("Grizzly Bears", 3, p);
         for (Card c : p.getCardsIn(ZoneType.Battlefield)) c.setSickness(false);
@@ -2770,6 +2821,205 @@ public class HasAvailableActionsTest extends SimulationTest {
         AssertJUnit.assertFalse(
                 "Counterspell should NOT be actionable with an empty stack",
                 affordableCardNames(p).contains("Counterspell"));
+    }
+
+    // =================================================================
+    // Cost-bearing OTMA deferral — fixed-point admission
+    // =================================================================
+
+    @Test
+    public void testThreeTreeCityAloneAdvancedNotCommitted() {
+        // TTC alone with no other mana sources. The {2}{T} advanced
+        // ability has cost 2 but the only other contributor on the board
+        // is TTC's own basic {T} → same exclusion group → sameSelf = 1,
+        // available = totalMana - sameSelf = 1 - 1 = 0 < 2. Drop.
+        // Rainbow bucket stays 0; total stays 1 (TTC basic only).
+        Player p = newGame();
+        addCard("Three Tree City", p);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals("rainbow must NOT be reachable", 0,
+                b.getBucket(ManaBudget.IDX_RAINBOW));
+        AssertJUnit.assertEquals(1, b.getTotalMana());
+    }
+
+    @Test
+    public void testThreeTreeCityPlusOnePlainsAdvancedStillUnpayable() {
+        // TTC + 1 Plains + 1 chosen-type creature. Baseline = 1 (Plains)
+        // + 1 (TTC basic) = 2. For TTC advanced: sameSelf = 1, available
+        // = 2 - 1 = 1 < 2. Drop.
+        Player p = newGame();
+        addCard("Plains", p);
+        addCard("Three Tree City", p);
+        addCard("Grizzly Bears", p).setSickness(false);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals(0, b.getBucket(ManaBudget.IDX_RAINBOW));
+        AssertJUnit.assertEquals(2, b.getTotalMana());
+    }
+
+    @Test
+    public void testThreeTreeCityPlusTwoPlainsAdvancedAdmits() {
+        // TTC + 2 Plains + 1 chosen-type creature. Baseline = 2 (Plains)
+        // + 1 (TTC basic) = 3. For TTC advanced: sameSelf = 1, available
+        // = 3 - 1 = 2 ≥ 2. Admit. Rainbow bucket = 1 × creatureCount = 1.
+        Player p = newGame();
+        addCards("Plains", 2, p);
+        addCard("Three Tree City", p);
+        addCard("Grizzly Bears", p).setSickness(false);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals(1, b.getBucket(ManaBudget.IDX_RAINBOW));
+        AssertJUnit.assertEquals(3, b.getTotalMana());
+    }
+
+    @Test
+    public void testThreeTreeCityPlusSolRingAdvancedAdmits() {
+        // TTC + Sol Ring + chosen-type creature. Sol Ring is cost-free,
+        // contributes 2 to baseline. TTC advanced: sameSelf = 1,
+        // available = 3 - 1 = 2 ≥ 2 → admit.
+        Player p = newGame();
+        addCard("Sol Ring", p).setSickness(false);
+        addCard("Three Tree City", p);
+        addCard("Grizzly Bears", p).setSickness(false);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals(1, b.getBucket(ManaBudget.IDX_RAINBOW));
+        // Total = 2 (Sol Ring) + max(1 basic, advanced_net 1−2 clamp 0) = 3.
+        AssertJUnit.assertEquals(3, b.getTotalMana());
+    }
+
+    @Test
+    public void testIzzetSignetChainsIntoThreeTreeCityViaFixedPoint() {
+        // Two-layer fixed-point chain: Izzet Signet ({1}{T}: Add UR,
+        // cost 1, net 1) needs 1 mana from elsewhere to activate. Three
+        // Tree City advanced ({2}{T}: Add Chosen × N, cost 2) needs 2
+        // mana from non-TTC-tap sources to activate.
+        //
+        // Board: Plains + Izzet Signet + Three Tree City + Grizzly Bears
+        //  (chosen type = Bear).
+        //
+        // Layer 1 baseline (cost-free):
+        //   Plains  → +1 W, total 1
+        //   TTC basic ({T}: Add C) → TAP[ttc] = 1, total 2
+        //   Signet, TTC advanced → both pending
+        //
+        // Layer 2 (fixed-point pass 1):
+        //   Signet: cost 1, sameSelf for Signet TAP = 0 (no other Signet
+        //     ability), available = 2 ≥ 1 → admit. Net 1, total → 3.
+        //   TTC advanced: cost 2, sameSelf for TTC TAP = 1 (basic),
+        //     available = 3 - 1 = 2 ≥ 2 → admit. Net 1, but max(1, 1) = 1
+        //     → no delta to total. Bucket rainbow = 1.
+        //
+        // Note: if the loop walked TTC advanced FIRST in pass 1, available
+        // would be 2 - 1 = 1 < 2 (Signet not yet admitted). It would
+        // defer. Then pass 2 picks up Signet → total 3, then a third pass
+        // picks up TTC advanced. Either way the final state matches:
+        //   Total = 3, Rainbow = 1, U=1, R=1, W=1, C=1.
+        Player p = newGame();
+        addCard("Plains", p);
+        addCard("Izzet Signet", p).setSickness(false);
+        addCard("Three Tree City", p);
+        addCard("Grizzly Bears", p).setSickness(false);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals("Plains W", 1, b.getBucket(ManaBudget.IDX_W));
+        AssertJUnit.assertEquals("Signet U", 1, b.getBucket(ManaBudget.IDX_U));
+        AssertJUnit.assertEquals("Signet R", 1, b.getBucket(ManaBudget.IDX_R));
+        AssertJUnit.assertEquals("TTC basic C", 1, b.getBucket(ManaBudget.IDX_C));
+        AssertJUnit.assertEquals("TTC advanced rainbow", 1, b.getBucket(ManaBudget.IDX_RAINBOW));
+        AssertJUnit.assertEquals("Total 1 (Plains) + 1 (Signet net) + 1 (TTC max) = 3", 3,
+                b.getTotalMana());
+    }
+
+    @Test
+    public void testIzzetSignetAloneNotPayable() {
+        // Signet alone: cost 1, no other mana → drop. Total stays 0.
+        // Verifies the deferred-cost fixed-point's "drop unpayable" path.
+        Player p = newGame();
+        addCard("Izzet Signet", p).setSickness(false);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals(0, b.getBucket(ManaBudget.IDX_U));
+        AssertJUnit.assertEquals(0, b.getBucket(ManaBudget.IDX_R));
+        AssertJUnit.assertEquals(0, b.getTotalMana());
+    }
+
+    @Test
+    public void testNykthosAloneAdvancedNotCommitted() {
+        // Nykthos, Shrine to Nyx alone — no other mana, no devotion. The
+        // {2}{T} ChooseColor ability has cost 2 and zero net (no devotion),
+        // and even if devotion were positive there's no other mana source
+        // to pay the {2}. Devotion buckets must NOT be folded.
+        //
+        // Nykthos's basic {T}: Add {C} ability is cost-free → C bucket = 1,
+        // total = 1. Advanced ability is dropped.
+        Player p = newGame();
+        addCard("Nykthos, Shrine to Nyx", p);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals(1, b.getBucket(ManaBudget.IDX_C));
+        AssertJUnit.assertEquals(1, b.getTotalMana());
+        AssertJUnit.assertEquals("no devotion fold without payable cost", 0,
+                b.getBucket(ManaBudget.IDX_G));
+    }
+
+    @Test
+    public void testNykthosDevotionFromNonManaCreaturesDropsAdvanced() {
+        // Nykthos + 3 Heliod's Pilgrim (W creature, devotion W = 3, but
+        // Pilgrim has NO mana ability). Nykthos's {2}{T} cost can't be
+        // paid: baseline = 1 (Nykthos basic), sameSelf for Nykthos TAP
+        // = 1, available = 0 < 2 → drop.
+        //
+        // Advanced not admitted → devotion W bucket NOT folded by Nykthos.
+        Player p = newGame();
+        addCard("Nykthos, Shrine to Nyx", p);
+        addCards("Heliod's Pilgrim", 3, p);
+        for (Card c : p.getCardsIn(ZoneType.Battlefield)) c.setSickness(false);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals(1, b.getBucket(ManaBudget.IDX_C));
+        // Heliod's Pilgrim is a W creature with no mana ability → Nykthos
+        // sees devotion W = 3, but the deferred fold drops because cost
+        // is unpayable. W bucket from Nykthos must be 0.
+        AssertJUnit.assertEquals("Nykthos devotion fold dropped — cost unpayable",
+                0, b.getBucket(ManaBudget.IDX_W));
+    }
+
+    @Test
+    public void testNykthosWithDevotionAndExtraManaAdvancedAdmits() {
+        // Nykthos + 3 Llanowar Elves (devotion G = 3, each provides G).
+        // Baseline = 1 (Nykthos basic) + 3 (Elves) = 4. Nykthos sameSelf
+        // = 1, available = 3 ≥ 2 → admit. Nykthos devotion fold adds
+        // G += 3 (from devotion calc).
+        // G total = 3 (Elves) + 3 (Nykthos devotion fold) = 6.
+        // Total = 3 (Elves) + max(Nykthos basic 1, advanced_net 3-2=1) = 4.
+        Player p = newGame();
+        addCard("Nykthos, Shrine to Nyx", p);
+        addCards("Llanowar Elves", 3, p);
+        for (Card c : p.getCardsIn(ZoneType.Battlefield)) c.setSickness(false);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals("G = 3 Elves + 3 Nykthos devotion fold",
+                6, b.getBucket(ManaBudget.IDX_G));
+        AssertJUnit.assertEquals(1, b.getBucket(ManaBudget.IDX_C));
+        AssertJUnit.assertEquals(4, b.getTotalMana());
+    }
+
+    @Test
+    public void testRockfaceVillageRiskRegressionRetainedAfterDeferralRefactor() {
+        // Verifies the Rockface Village fix from earlier still holds with
+        // the deferred-cost-OTMA refactor in place. Rockface has TWO tap
+        // abilities, both cost-free (no mana cost), so neither defers.
+        // The exclusion-group max-per-card rule must still prevent
+        // double-counting the restricted tap-self into total.
+        Player p = newGame();
+        addCard("Island", p);
+        addCard("Mountain", p);
+        addCard("Rockface Village", p);
+        addCard("Stormcatch Mentor", p).setSickness(false);
+        addCardToZone("Bria, Riptide Rogue", p, ZoneType.Hand);
+        AssertJUnit.assertFalse(canAffordFromHand(p, "Bria, Riptide Rogue"));
     }
 
     // --- Sanity canary ---
