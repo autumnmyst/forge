@@ -54,6 +54,11 @@ public class RemoteClientGuiGame extends NetworkGuiGame implements IHasForgeLog 
 
     private GameEventForwarder forwarder;
     private boolean flushing;
+    // Most recent yield preferences snapshot received from the remote client.
+    // Read on the game thread by YieldController.shouldInterruptYield; written
+    // on the Netty thread when notifyYieldStateChanged arrives. volatile is
+    // sufficient since the value is an immutable YieldPrefs.
+    private volatile forge.gamemodes.match.YieldPrefs remoteYieldPrefs;
 
     public RemoteClientGuiGame(final RemoteClient client) {
         this.client = client;
@@ -63,6 +68,11 @@ public class RemoteClientGuiGame extends NetworkGuiGame implements IHasForgeLog 
 
     public RemoteClient getClient() {
         return client;
+    }
+
+    @Override
+    public boolean isRemoteGuiProxy() {
+        return true;
     }
 
     public void pause() {
@@ -483,6 +493,27 @@ public class RemoteClientGuiGame extends NetworkGuiGame implements IHasForgeLog 
     public boolean isUiSetToSkipPhase(final PlayerView playerTurn, final PhaseType phase) {
         final Boolean result = sendAndWait(ProtocolMethod.isUiSetToSkipPhase, playerTurn, phase);
         return Boolean.TRUE.equals(result);
+    }
+
+    @Override
+    public void syncYieldMode(final PlayerView player, final forge.gamemodes.match.YieldMode mode) {
+        // Send yield state to client (when server clears yield due to end condition)
+        send(ProtocolMethod.syncYieldMode, player, mode);
+    }
+
+    @Override
+    public void setRemoteYieldPrefs(forge.gamemodes.match.YieldPrefs prefs) {
+        this.remoteYieldPrefs = prefs;
+    }
+
+    @Override
+    public forge.gamemodes.match.YieldPrefs getRemoteYieldPrefs() {
+        return remoteYieldPrefs;
+    }
+
+    @Override
+    public void setHostYieldEnabled(final boolean enabled) {
+        send(ProtocolMethod.setHostYieldEnabled, enabled);
     }
 
     @Override

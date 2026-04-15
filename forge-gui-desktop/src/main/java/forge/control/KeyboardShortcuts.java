@@ -19,6 +19,9 @@ import org.apache.commons.lang3.StringUtils;
 
 import forge.Singletons;
 import forge.game.spellability.StackItemView;
+import forge.gamemodes.match.YieldMode;
+import forge.gamemodes.net.event.MessageEvent;
+import forge.gamemodes.net.server.FServerManager;
 import forge.gui.framework.EDocID;
 import forge.gui.framework.SDisplayUtil;
 import forge.localinstance.properties.ForgePreferences;
@@ -128,6 +131,48 @@ public class KeyboardShortcuts {
                 if (!Singletons.getControl().getCurrentScreen().isMatchScreen()) { return; }
                 if (matchUI == null) { return; }
                 matchUI.getGameController().passPriorityUntilEndOfTurn();
+            }
+        };
+
+        /** Build a yield-mode F-key action. The 3+ players guard applies only
+         *  to UNTIL_YOUR_NEXT_TURN; all other modes ignore it. */
+        final java.util.function.Function<YieldMode, Action> makeYieldAction = mode -> new AbstractAction() {
+            @Override
+            public void actionPerformed(final ActionEvent e) {
+                if (!Singletons.getControl().getCurrentScreen().isMatchScreen()) { return; }
+                if (matchUI == null || matchUI.getCurrentPlayer() == null) { return; }
+                if (!FModel.getPreferences().getPrefBoolean(FPref.YIELD_EXPERIMENTAL_OPTIONS)) { return; }
+                if (mode == YieldMode.UNTIL_YOUR_NEXT_TURN
+                        && (matchUI.getGameView() == null || matchUI.getGameView().getPlayers().size() < 3)) {
+                    return;
+                }
+                boolean activated = matchUI.setYieldMode(matchUI.getCurrentPlayer(), mode, false);
+                if (activated && matchUI.getGameController() != null) {
+                    matchUI.getGameController().passPriority();
+                }
+            }
+        };
+
+        final Action actYieldUntilNextPhase = makeYieldAction.apply(YieldMode.UNTIL_NEXT_PHASE);
+        final Action actYieldUntilStackClears = makeYieldAction.apply(YieldMode.UNTIL_STACK_CLEARS);
+        final Action actYieldUntilYourNextTurn = makeYieldAction.apply(YieldMode.UNTIL_YOUR_NEXT_TURN);
+        final Action actYieldUntilEndOfTurn = makeYieldAction.apply(YieldMode.UNTIL_END_OF_TURN);
+        final Action actYieldUntilBeforeCombat = makeYieldAction.apply(YieldMode.UNTIL_BEFORE_COMBAT);
+        final Action actYieldUntilEndStep = makeYieldAction.apply(YieldMode.UNTIL_END_STEP);
+        final Action actYieldUntilEndStepBeforeYourTurn = makeYieldAction.apply(YieldMode.UNTIL_END_STEP_BEFORE_YOUR_TURN);
+
+        /** Cancel current yield mode and auto-pass-no-actions (experimental). */
+        final Action actCancelYield = new AbstractAction() {
+            @Override
+            public void actionPerformed(final ActionEvent e) {
+                if (!Singletons.getControl().getCurrentScreen().isMatchScreen()) { return; }
+                if (matchUI == null || matchUI.getCurrentPlayer() == null) { return; }
+                if (!FModel.getPreferences().getPrefBoolean(FPref.YIELD_EXPERIMENTAL_OPTIONS)) { return; }
+                YieldMode currentYield = matchUI.getYieldMode(matchUI.getCurrentPlayer());
+                if (currentYield != null && currentYield != YieldMode.NONE) {
+                    matchUI.clearYieldMode(matchUI.getCurrentPlayer());
+                }
+                matchUI.getCYield().cancelAutoPassIfActive();
             }
         };
 
@@ -246,6 +291,46 @@ public class KeyboardShortcuts {
             }
         };
 
+        /** Toggle yield options. */
+        final Action actYieldOptions = new AbstractAction() {
+            @Override
+            public void actionPerformed(final ActionEvent e) {
+                if (!Singletons.getControl().getCurrentScreen().isMatchScreen()) { return; }
+                final ForgePreferences prefs = FModel.getPreferences();
+                final boolean newState = !prefs.getPrefBoolean(FPref.YIELD_EXPERIMENTAL_OPTIONS);
+                prefs.setPref(FPref.YIELD_EXPERIMENTAL_OPTIONS, newState);
+                prefs.save();
+                if (matchUI != null) {
+                    matchUI.refreshYieldPanel();
+                }
+                final FServerManager server = FServerManager.getInstance();
+                if (server != null && server.isHosting()) {
+                    server.broadcast(new MessageEvent(Localizer.getInstance().getMessage(
+                        newState ? "lblYieldHostEnabled" : "lblYieldHostToggleDisabled")));
+                    server.broadcastHostYieldEnabled(newState);
+                }
+            }
+        };
+
+        /** Toggle auto-pass when no actions. */
+        final Action actAutoPassNoActions = new AbstractAction() {
+            @Override
+            public void actionPerformed(final ActionEvent e) {
+                if (!Singletons.getControl().getCurrentScreen().isMatchScreen()) { return; }
+                if (!FModel.getPreferences().getPrefBoolean(FPref.YIELD_EXPERIMENTAL_OPTIONS)) { return; }
+                final ForgePreferences prefs = FModel.getPreferences();
+                final boolean newState = !prefs.getPrefBoolean(FPref.YIELD_AUTO_PASS_NO_ACTIONS);
+                prefs.setPref(FPref.YIELD_AUTO_PASS_NO_ACTIONS, newState);
+                prefs.save();
+                if (matchUI != null) {
+                    matchUI.refreshYieldPanel();
+                    if (newState && matchUI.getGameController() != null) {
+                        matchUI.getGameController().selectButtonOk();
+                    }
+                }
+            }
+        };
+
         /** Show keyboard shortcuts dialog. */
         final Action actShowHotkeys = new AbstractAction() {
             @Override
@@ -266,6 +351,16 @@ public class KeyboardShortcuts {
         list.add(new Shortcut(FPref.SHORTCUT_UNDO, localizer.getMessage("lblSHORTCUT_UNDO"), actUndo, am, im));
         list.add(new Shortcut(FPref.SHORTCUT_CONCEDE, localizer.getMessage("lblSHORTCUT_CONCEDE"), actConcede, am, im));
         list.add(new Shortcut(FPref.SHORTCUT_ENDTURN, localizer.getMessage("lblSHORTCUT_ENDTURN"), actEndTurn, am, im));
+        list.add(new Shortcut(FPref.SHORTCUT_YIELD_OPTIONS, localizer.getMessage("lblSHORTCUT_YIELD_OPTIONS"), actYieldOptions, am, im));
+        list.add(new Shortcut(FPref.SHORTCUT_YIELD_AUTO_PASS, localizer.getMessage("lblSHORTCUT_YIELD_AUTO_PASS"), actAutoPassNoActions, am, im));
+        list.add(new Shortcut(FPref.SHORTCUT_YIELD_UNTIL_NEXT_PHASE, localizer.getMessage("lblSHORTCUT_YIELD_UNTIL_NEXT_PHASE"), actYieldUntilNextPhase, am, im));
+        list.add(new Shortcut(FPref.SHORTCUT_YIELD_UNTIL_BEFORE_COMBAT, localizer.getMessage("lblSHORTCUT_YIELD_UNTIL_BEFORE_COMBAT"), actYieldUntilBeforeCombat, am, im));
+        list.add(new Shortcut(FPref.SHORTCUT_YIELD_UNTIL_END_STEP, localizer.getMessage("lblSHORTCUT_YIELD_UNTIL_END_STEP"), actYieldUntilEndStep, am, im));
+        list.add(new Shortcut(FPref.SHORTCUT_YIELD_UNTIL_END_OF_TURN, localizer.getMessage("lblSHORTCUT_YIELD_UNTIL_END_OF_TURN"), actYieldUntilEndOfTurn, am, im));
+        list.add(new Shortcut(FPref.SHORTCUT_YIELD_UNTIL_END_STEP_BEFORE_YOUR_TURN, localizer.getMessage("lblSHORTCUT_YIELD_UNTIL_END_STEP_BEFORE_YOUR_TURN"), actYieldUntilEndStepBeforeYourTurn, am, im));
+        list.add(new Shortcut(FPref.SHORTCUT_YIELD_UNTIL_YOUR_NEXT_TURN, localizer.getMessage("lblSHORTCUT_YIELD_UNTIL_YOUR_NEXT_TURN"), actYieldUntilYourNextTurn, am, im));
+        list.add(new Shortcut(FPref.SHORTCUT_YIELD_UNTIL_STACK_CLEARS, localizer.getMessage("lblSHORTCUT_YIELD_UNTIL_STACK_CLEARS"), actYieldUntilStackClears, am, im));
+        list.add(new Shortcut(FPref.SHORTCUT_YIELD_CANCEL, localizer.getMessage("lblSHORTCUT_YIELD_CANCEL"), actCancelYield, am, im));
         list.add(new Shortcut(FPref.SHORTCUT_ALPHASTRIKE, localizer.getMessage("lblSHORTCUT_ALPHASTRIKE"), actAllAttack, am, im));
         list.add(new Shortcut(FPref.SHORTCUT_SHOWTARGETING, localizer.getMessage("lblSHORTCUT_SHOWTARGETING"), actTgtOverlay, am, im));
         list.add(new Shortcut(FPref.SHORTCUT_AUTOYIELD_ALWAYS_YES, localizer.getMessage("lblSHORTCUT_AUTOYIELD_ALWAYS_YES"), actAutoYieldAndYes, am, im));

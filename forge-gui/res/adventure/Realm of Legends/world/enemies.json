@@ -44489,22 +44489,17 @@
     ],
     "ai": "",
     "speed": 45,
-    "life": 30,
+    "life": 20,
     "rewards": [
-      {
-        "type": "item",
-        "count": 1,
-        "cardName": "Ajani's Amulet"
-      },
-      {
+     {
         "type": "card",
         "count": 1,
         "cardName": "Ajani, Nacatl Pariah"
       },
       {
         "type": "deckCard",
-        "count": 2,
-        "addMaxCount": 4,
+        "count": 1,
+        "addMaxCount": 3,
         "rarity": [
           "Rare",
           "Mythic Rare"
@@ -44512,57 +44507,40 @@
       },
       {
         "type": "deckCard",
-        "count": 1,
-        "addMaxCount": 3,
+        "count": 2,
+        "addMaxCount": 4,
         "rarity": [
           "common",
           "uncommon"
         ]
+      },
+      {
+        "type": "randomCard",
+        "count": 1,
+        "addMaxCount": 3,
+        "rarity": [
+          "Rare",
+          "Mythic Rare"
+	]
       },
       {
         "type": "randomCard",
         "count": 2,
         "addMaxCount": 4,
         "rarity": [
-          "Rare",
-          "Mythic Rare"
-        ]
-      },
-      {
-        "type": "randomCard",
-        "count": 1,
-        "addMaxCount": 3,
-        "rarity": [
           "common",
           "uncommon"
-        ]
+	]
       },
       {
         "type": "gold",
-        "count": 100,
-        "addMaxCount": 1000
+        "count": 50,
+        "addMaxCount": 250
       },
       {
         "type": "shards",
-        "count": 5,
-        "addMaxCount": 15
-      },
-      {
-        "type": "card",
-        "probability": 0.1,
         "count": 1,
-        "sourceDeck": "decks/rewards/High_End_Alt-Art.dck"
-      },
-      {
-        "type": "card",
-        "count": 1,
-        "probability": 0.2,
-        "sourceDeck": "decks/rewards/Alt-Art_Staples.dck"
-      },
-      {
-        "type": "landSketchbookShop",
-        "probability": 0.1,
-        "count": 1
+        "addMaxCount": 5
       }
     ],
     "colors": "WR",
@@ -44716,22 +44694,17 @@
     ],
     "ai": "",
     "speed": 45,
-    "life": 30,
+    "life": 20,
     "rewards": [
-      {
-        "type": "item",
-        "count": 1,
-        "cardName": "Pack Leader Pants"
-      },
-      {
+     {
         "type": "card",
         "count": 1,
         "cardName": "Rin and Seri, Inseparable"
       },
       {
         "type": "deckCard",
-        "count": 2,
-        "addMaxCount": 4,
+        "count": 1,
+        "addMaxCount": 3,
         "rarity": [
           "Rare",
           "Mythic Rare"
@@ -44739,57 +44712,40 @@
       },
       {
         "type": "deckCard",
-        "count": 1,
-        "addMaxCount": 3,
+        "count": 2,
+        "addMaxCount": 4,
         "rarity": [
           "common",
           "uncommon"
         ]
+      },
+      {
+        "type": "randomCard",
+        "count": 1,
+        "addMaxCount": 3,
+        "rarity": [
+          "Rare",
+          "Mythic Rare"
+	]
       },
       {
         "type": "randomCard",
         "count": 2,
         "addMaxCount": 4,
         "rarity": [
-          "Rare",
-          "Mythic Rare"
-        ]
-      },
-      {
-        "type": "randomCard",
-        "count": 1,
-        "addMaxCount": 3,
-        "rarity": [
           "common",
           "uncommon"
-        ]
+	]
       },
       {
         "type": "gold",
-        "count": 100,
-        "addMaxCount": 1000
+        "count": 50,
+        "addMaxCount": 250
       },
       {
         "type": "shards",
-        "count": 5,
-        "addMaxCount": 15
-      },
-      {
-        "type": "card",
-        "probability": 0.1,
         "count": 1,
-        "sourceDeck": "decks/rewards/High_End_Alt-Art.dck"
-      },
-      {
-        "type": "card",
-        "count": 1,
-        "probability": 0.2,
-        "sourceDeck": "decks/rewards/Alt-Art_Staples.dck"
-      },
-      {
-        "type": "landSketchbookShop",
-        "probability": 0.1,
-        "count": 1
+        "addMaxCount": 5
       }
     ],
     "colors": "WRG",

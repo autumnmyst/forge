@@ -173,7 +173,7 @@ public abstract class AbstractGuiGame implements IGuiGame, IMayViewCards {
                 gameControllers.put(player, originalGameControllers.get(player));
             } else {
                 gameControllers.remove(player);
-                autoPassUntilEndOfTurn.remove(player);
+                getYieldController().removeFromLegacyAutoPass(player);
                 final PlayerView currentPlayer = getCurrentPlayer();
                 if (player.equals(currentPlayer)) {
                     // set current player to a value known to be legal
@@ -417,7 +417,15 @@ public abstract class AbstractGuiGame implements IGuiGame, IMayViewCards {
 
     // Auto-yield and other input-related code
 
-    private final Set<PlayerView> autoPassUntilEndOfTurn = Sets.newHashSet();
+    // Yield controller manages all yield state and logic
+    private YieldController yieldController;
+
+    private YieldController getYieldController() {
+        if (yieldController == null) {
+            yieldController = new YieldController(this);
+        }
+        return yieldController;
+    }
 
     /**
      * Automatically pass priority until reaching the Cleanup phase of the
@@ -425,26 +433,23 @@ public abstract class AbstractGuiGame implements IGuiGame, IMayViewCards {
      */
     @Override
     public final void autoPassUntilEndOfTurn(final PlayerView player) {
-        autoPassUntilEndOfTurn.add(player);
+        getYieldController().autoPassUntilEndOfTurn(player);
         updateAutoPassPrompt();
     }
 
     @Override
     public final void autoPassCancel(final PlayerView player) {
-        if (!autoPassUntilEndOfTurn.remove(player)) {
-            return;
-        }
-
-        //prevent prompt getting stuck on yielding message while actually waiting for next input opportunity
-        final PlayerView playerView = getCurrentPlayer();
-        showPromptMessage(playerView, "");
-        updateButtons(playerView, false, false, false);
-        awaitNextInput();
+        getYieldController().autoPassCancel(player);
     }
 
     @Override
     public final boolean mayAutoPass(final PlayerView player) {
-        return autoPassUntilEndOfTurn.contains(player);
+        return getYieldController().mayAutoPass(player);
+    }
+
+    @Override
+    public final boolean isAutoPassingNoActions(final PlayerView player) {
+        return getYieldController().isAutoPassingNoActions(player);
     }
 
     private Timer awaitNextInputTimer;
@@ -580,13 +585,74 @@ public abstract class AbstractGuiGame implements IGuiGame, IMayViewCards {
 
     @Override
     public final void updateAutoPassPrompt() {
-        if (!autoPassUntilEndOfTurn.isEmpty()) {
-            //allow user to cancel auto-pass
-            cancelAwaitNextInput(); //don't overwrite prompt with awaiting opponent
-            showPromptMessage(getCurrentPlayer(), Localizer.getInstance().getMessage("lblYieldingUntilEndOfTurn"));
-            updateButtons(getCurrentPlayer(), false, true, false);
+        getYieldController().updateAutoPassPrompt(getCurrentPlayer());
+    }
+
+    // Extended yield mode methods (experimental feature)
+    @Override
+    public final boolean setYieldMode(PlayerView player, final YieldMode mode, boolean fromRemote) {
+        if (fromRemote) {
+            // Host is receiving yield state from a network client. The deserialized
+            // PlayerView has a different tracker than the host's, so look up the
+            // canonical instance. Skip validation and the notify-server callback to
+            // avoid looping back to the client.
+            player = PlayerView.findById(getGameView(), player);
+            if (player == null) {
+                return false;
+            }
+            getYieldController().setYieldModeSilent(player, mode);
+            return true;
+        }
+
+        boolean activated = getYieldController().setYieldMode(player, mode);
+        if (activated) {
+            updateAutoPassPrompt();
+
+            // Notify remote server if this is a network client. The prefs
+            // snapshot rides on every yield-state message so the host's stored
+            // copy stays fresh.
+            IGameController controller = getGameController(player);
+            if (controller != null) {
+                controller.notifyYieldStateChanged(player, mode, YieldPrefs.fromCurrentPreferences());
+            }
+        }
+        return activated;
+    }
+
+    @Override
+    public void setHostYieldEnabled(boolean enabled) {
+        // No-op default for local games. CMatchUI overrides to store and refresh UI.
+    }
+
+    @Override
+    public void syncYieldMode(PlayerView player, YieldMode mode) {
+        // Receive yield state sync from server (when server clears yield due to end condition)
+        // Look up the correct PlayerView instance by ID (network PlayerViews have different trackers)
+        player = PlayerView.findById(getGameView(), player);
+        if (player == null) {
+            return;
+        }
+        // Use silent methods to avoid triggering callback which would loop back here
+        getYieldController().setYieldModeSilent(player, mode);
+        // Note: Don't call updateAutoPassPrompt() - server already sent the correct prompt
+    }
+
+    @Override
+    public final void clearYieldMode(PlayerView player) {
+        getYieldController().clearYieldMode(player);
+
+        // Notify remote server that yield was cancelled (same pattern as setYieldMode)
+        IGameController controller = getGameController(player);
+        if (controller != null) {
+            controller.notifyYieldStateChanged(player, YieldMode.NONE, YieldPrefs.fromCurrentPreferences());
         }
     }
+
+    @Override
+    public final YieldMode getYieldMode(PlayerView player) {
+        return getYieldController().getYieldMode(player);
+    }
+
     // End auto-yield/input code
 
     // Abilities to auto-yield to

@@ -57,6 +57,8 @@ public class FButton extends SkinnedButton implements ILocalRepaint, IButton {
     private boolean allImagesPresent = false;
     private boolean toggle = false;
     private boolean hovered = false;
+    private boolean useHighlightMode = false;
+    private boolean highlighted = false;
     private final AlphaComposite disabledComposite = AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.25f);
     private KeyAdapter klEnter;
 
@@ -150,6 +152,23 @@ public class FButton extends SkinnedButton implements ILocalRepaint, IButton {
     }
 
     private void resetImg() {
+        if (useHighlightMode) {
+            // Stale hovered flag can persist across tab switches and window focus changes
+            if (hovered) {
+                imgL = FSkin.getIcon(FSkinProp.IMG_BTN_OVER_LEFT);
+                imgM = FSkin.getIcon(FSkinProp.IMG_BTN_OVER_CENTER);
+                imgR = FSkin.getIcon(FSkinProp.IMG_BTN_OVER_RIGHT);
+            } else if (highlighted) {
+                imgL = FSkin.getIcon(FSkinProp.IMG_BTN_UP_LEFT);
+                imgM = FSkin.getIcon(FSkinProp.IMG_BTN_UP_CENTER);
+                imgR = FSkin.getIcon(FSkinProp.IMG_BTN_UP_RIGHT);
+            } else {
+                imgL = FSkin.getIcon(FSkinProp.IMG_BTN_FOCUS_LEFT);
+                imgM = FSkin.getIcon(FSkinProp.IMG_BTN_FOCUS_CENTER);
+                imgR = FSkin.getIcon(FSkinProp.IMG_BTN_FOCUS_RIGHT);
+            }
+            return;
+        }
         if (hovered) {
             imgL = FSkin.getIcon(FSkinProp.IMG_BTN_OVER_LEFT);
             imgM = FSkin.getIcon(FSkinProp.IMG_BTN_OVER_CENTER);
@@ -207,6 +226,48 @@ public class FButton extends SkinnedButton implements ILocalRepaint, IButton {
         }
         this.toggle = b0;
         repaintSelf();
+    }
+
+    /**
+     * Enable highlight mode for this button.
+     * In highlight mode, button colors are inverted:
+     * - Normal state uses FOCUS images (blue)
+     * - Highlighted state uses UP images (red/orange)
+     * Used for yield buttons.
+     * @param b0 true to enable highlight mode
+     */
+    public void setUseHighlightMode(final boolean b0) {
+        this.useHighlightMode = b0;
+        if (isEnabled() && !isToggled()) {
+            resetImg();
+            repaintSelf();
+        }
+    }
+
+    /**
+     * Check if button is in highlighted state.
+     * Only meaningful when useHighlightMode is true.
+     * @return boolean
+     */
+    public boolean isHighlighted() {
+        return highlighted;
+    }
+
+    /**
+     * Set highlighted state for the button.
+     * Requires useHighlightMode to be enabled first.
+     * When highlighted=false: uses FOCUS images (blue)
+     * When highlighted=true: uses UP images (red/orange)
+     * This is used for yield buttons to show which yield is active.
+     * @param b0 true to highlight (red), false for normal (blue)
+     */
+    public void setHighlighted(final boolean b0) {
+        this.highlighted = b0;
+        this.hovered = false;
+        if (isEnabled() && !isToggled()) {
+            resetImg();
+            repaintSelf();
+        }
     }
 
     public int getAutoSizeWidth() {
