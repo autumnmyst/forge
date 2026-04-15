@@ -1535,12 +1535,15 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
             if (stack.isEmpty()) {
                 // make sure to briefly pause at phases you're not set up to skip
                 if (!getGui().isUiSetToSkipPhase(getGame().getPhaseHandler().getPlayerTurn().getView(),
-                        getGame().getPhaseHandler().getPhase())) {
+                        getGame().getPhaseHandler().getPhase())
+                        && !FModel.getPreferences().getPrefBoolean(FPref.YIELD_SKIP_PHASE_DELAY)) {
                     delay = FControlGamePlayback.phasesDelay;
                 }
             } else {
                 // pause slightly longer for spells and abilities on the stack resolving
-                delay = FControlGamePlayback.resolveDelay;
+                if (!FModel.getPreferences().getPrefBoolean(FPref.YIELD_SKIP_RESOLVE_DELAY)) {
+                    delay = FControlGamePlayback.resolveDelay;
+                }
             }
             if (delay > 0) {
                 try {
@@ -1568,10 +1571,12 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
             final SpellAbility ability = stack.peekAbility();
             if (ability != null && ability.isAbility() && getGui().shouldAutoYield(ability.yieldKey())) {
                 // avoid prompt for input if top ability of stack is set to auto-yield
-                try {
-                    Thread.sleep(FControlGamePlayback.resolveDelay);
-                } catch (final InterruptedException e) {
-                    e.printStackTrace();
+                if (!FModel.getPreferences().getPrefBoolean(FPref.YIELD_SKIP_RESOLVE_DELAY)) {
+                    try {
+                        Thread.sleep(FControlGamePlayback.resolveDelay);
+                    } catch (final InterruptedException e) {
+                        e.printStackTrace();
+                    }
                 }
                 netLog.trace("Returning null (autoYield) for player {}", player.getName());
                 return null;

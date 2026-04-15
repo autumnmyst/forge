@@ -157,6 +157,8 @@ public class ForgePreferences extends PreferencesStore<ForgePreferences.FPref> {
         YIELD_DECLINE_SCOPE_STACK_YIELD("stack"),  // Decline scope: "never", "always", "stack", "turn"
         YIELD_DECLINE_SCOPE_NO_ACTIONS("turn"),  // Decline scope: "never", "always", "turn"
         YIELD_AUTO_PASS_NO_ACTIONS("false"),  // Auto-pass priority when no playable actions
+        YIELD_SKIP_PHASE_DELAY("false"),  // Skip the delay between phases when auto-passing
+        YIELD_SKIP_RESOLVE_DELAY("false"),  // Skip the delay when stack items resolve during auto-pass
 
         UI_STACK_EFFECT_NOTIFICATION_POLICY ("Never"),
         UI_LAND_PLAYED_NOTIFICATION_POLICY ("Never"),

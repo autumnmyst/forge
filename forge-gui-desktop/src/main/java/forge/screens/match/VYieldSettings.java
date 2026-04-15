@@ -101,6 +101,20 @@ public class VYieldSettings extends FDialog {
         y = addCheckbox(x, y, w, localizer.getMessage("lblSuppressAfterYield"), FPref.YIELD_SUPPRESS_AFTER_END, prefs);
 
         y += SECTION_GAP;
+        JSeparator sep2 = new JSeparator();
+        add(sep2, x, y, w, 2);
+        y += 2 + SECTION_GAP;
+
+        // --- Speed section ---
+        FLabel lblSpeed = new FLabel.Builder().text(localizer.getMessage("lblSpeedSettings"))
+                .fontStyle(java.awt.Font.BOLD).fontSize(14).build();
+        add(lblSpeed, x, y, w, ROW_HEIGHT);
+        y += ROW_HEIGHT + 2;
+
+        y = addCheckbox(x, y, w, localizer.getMessage("lblSkipPhaseDelay"), FPref.YIELD_SKIP_PHASE_DELAY, prefs);
+        y = addCheckbox(x, y, w, localizer.getMessage("lblSkipResolveDelay"), FPref.YIELD_SKIP_RESOLVE_DELAY, prefs);
+
+        y += SECTION_GAP;
 
         // OK button
         FButton btnOk = new FButton(localizer.getMessage("lblOK"));
