@@ -7,7 +7,6 @@ import com.google.common.collect.Maps;
 import forge.LobbyPlayer;
 import forge.card.CardType;
 import forge.card.MagicColor;
-import forge.card.mana.ManaCostShard;
 import forge.card.mana.ManaAtom;
 import forge.game.GameEntityView;
 import forge.game.GameView;
@@ -563,122 +562,30 @@ public class PlayerView extends GameEntityView {
 
     /**
      * Check if this player has any available actions (playable spells/abilities).
-     * Used for smart yield suggestions in network play.
+     * Drives the smart yield and auto-pass-no-actions paths.
      *
-     * @param p the player to check
-     * @param availableMana pre-computed mana estimate (e.g. from ComputerUtilMana.getAvailableManaEstimate)
+     * Delegates to {@link ActionScan#scan}, which produces the same
+     * {@link ManaBudget} that the actionable-card highlight system uses, so
+     * both consumers see the same "probably playable" answer.
      */
-    public void updateHasAvailableActions(Player p, int availableMana) {
-        // Build color profile from floating mana and untapped mana-producing permanents
-        byte availableColors = 0;
-        for (byte color : ManaAtom.MANATYPES) {
-            if (p.getManaPool().getAmountOfColor(color) > 0) {
-                availableColors |= color;
+    public void updateHasAvailableActions(Player p) {
+        ActionScan scan = ActionScan.scan(p);
+        if (scan.hasStructuralBailout()) {
+            hasAvailableActionsCache = true;
+            return;
+        }
+        ManaBudget budget = scan.getBudget();
+        for (SpellAbility sa : scan.getSpellsToCheck()) {
+            if (sa.isLandAbility()) {
+                hasAvailableActionsCache = true;
+                return;
+            }
+            if (budget.canAfford(sa, scan) && hasValidTargets(sa)) {
+                hasAvailableActionsCache = true;
+                return;
             }
         }
-        for (Card card : p.getCardsIn(ZoneType.Battlefield)) {
-            if (availableColors == ManaAtom.ALL_MANA_TYPES) {
-                break; // already have all colors
-            }
-            if (!card.isTapped() && !card.getManaAbilities().isEmpty()) {
-                for (SpellAbility ma : card.getManaAbilities()) {
-                    if (ma.getManaPart() != null) {
-                        String produced = ma.getManaPart().getOrigProduced();
-                        if (produced.contains("Any")) {
-                            availableColors = ManaAtom.ALL_MANA_TYPES;
-                            break;
-                        } else {
-                            for (byte color : ManaAtom.MANATYPES) {
-                                if (ma.getManaPart().canProduce(MagicColor.toShortString(color), ma)) {
-                                    availableColors |= color;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Check hand for playable spells that we can afford
-        for (Card card : p.getCardsIn(ZoneType.Hand)) {
-            for (SpellAbility sa : card.getAllPossibleAbilities(p, true)) {
-                if (sa.isSpell()) {
-                    if (canAffordSpell(sa, availableMana, availableColors) && hasValidTargets(sa)) {
-                        hasAvailableActionsCache = true;
-                        return;
-                    }
-                } else if (sa.isLandAbility()) {
-                    // Land abilities are already filtered by canPlay() for timing
-                    hasAvailableActionsCache = true;
-                    return;
-                }
-            }
-        }
-
-        // Check battlefield for non-mana activated abilities we can afford
-        for (Card card : p.getCardsIn(ZoneType.Battlefield)) {
-            for (SpellAbility sa : card.getAllPossibleAbilities(p, true)) {
-                if (!sa.isManaAbility()) {
-                    if (canAffordSpell(sa, availableMana, availableColors) && hasValidTargets(sa)) {
-                        hasAvailableActionsCache = true;
-                        return;
-                    }
-                }
-            }
-        }
-
-        // Check graveyard, exile, command zone for playable abilities
-        for (ZoneType zone : new ZoneType[]{ZoneType.Graveyard, ZoneType.Exile, ZoneType.Command}) {
-            for (Card card : p.getCardsIn(zone)) {
-                for (SpellAbility sa : card.getAllPossibleAbilities(p, true)) {
-                    if (!sa.isManaAbility()) {
-                        if (canAffordSpell(sa, availableMana, availableColors) && hasValidTargets(sa)) {
-                            hasAvailableActionsCache = true;
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-
         hasAvailableActionsCache = false;
-    }
-
-    /**
-     * Check if a spell/ability can be afforded given available mana count and colors.
-     * Handles hybrid (need any one color) and phyrexian (always payable via life) shards.
-     */
-    private boolean canAffordSpell(SpellAbility sa, int availableMana, byte availableColors) {
-        if (sa.getPayCosts() == null || !sa.getPayCosts().hasManaCost()) {
-            return true; // free ability
-        }
-        forge.card.mana.ManaCost manaCost = sa.getPayCosts().getTotalMana();
-        int cmc = manaCost.getCMC();
-        if (cmc > availableMana) {
-            return false;
-        }
-        // Check colored requirements shard by shard
-        for (ManaCostShard shard : manaCost) {
-            if (shard.isPhyrexian()) {
-                continue; // always payable via life
-            }
-            byte colorMask = shard.getColorMask();
-            if (colorMask == 0) {
-                continue; // generic/colorless
-            }
-            if (shard.isMultiColor()) {
-                // hybrid: need ANY one of the colors
-                if ((colorMask & availableColors) == 0) {
-                    return false;
-                }
-            } else {
-                // mono: need that specific color
-                if ((colorMask & availableColors) != colorMask) {
-                    return false;
-                }
-            }
-        }
-        return true;
     }
 
     /**

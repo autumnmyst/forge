@@ -3,7 +3,6 @@ package forge.player;
 import com.google.common.collect.*;
 import forge.LobbyPlayer;
 import forge.StaticData;
-import forge.ai.ComputerUtilMana;
 import forge.ai.GameState;
 import forge.ai.PlayerControllerAi;
 import forge.card.*;
@@ -1519,33 +1518,73 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
 
     /**
      * Collect the set of cards the player could act on right now. Drives the
-     * light-blue "actionable" outline. When {@code paymentMode} is true (we're
-     * inside a cost payment), only mana abilities qualify — {@link SpellAbility#canPlay()}
-     * does not consult {@code costPaymentStack}, so the narrowing is enforced here.
+     * light-blue "actionable" outline.
+     *
+     * In payment mode (inside a cost payment) only mana abilities qualify —
+     * {@link SpellAbility#canPlay()} does not consult {@code costPaymentStack},
+     * so the narrowing is enforced here. In that mode the affordability check
+     * is not useful (you're already paying a cost), so we fall back to the
+     * simpler "can this SA fire at all" predicate.
+     *
+     * Otherwise we piggyback on the same {@link ActionScan} that APINA uses:
+     * one walk over all playable zones produces both the partitioned spell
+     * list and the mana budget. We then iterate {@code spellsToCheck} once
+     * and call {@code budget.canAfford} to get the "probably playable" answer
+     * that APINA sees, so the blue highlight and the auto-pass decision
+     * agree by construction.
      */
     public void pushActionableCards(boolean paymentMode) {
         final Set<CardView> result = Sets.newHashSet();
-        for (ZoneType zone : ACTIONABLE_ZONES) {
-            for (Card c : player.getCardsIn(zone)) {
-                if (cardHasActionableSa(c, paymentMode)) {
-                    result.add(c.getView());
+
+        if (paymentMode) {
+            for (ZoneType zone : ACTIONABLE_ZONES) {
+                for (Card c : player.getCardsIn(zone)) {
+                    if (cardHasPlayableManaAbility(c)) {
+                        result.add(c.getView());
+                    }
                 }
             }
+            getGui().setWeaklySelectable(result);
+            return;
         }
-        // Opponent-controlled cards can occasionally be actionable (steal effects, etc.).
-        // Scan the shared battlefield for anything not already captured.
-        for (Card c : getGame().getCardsIn(ZoneType.Battlefield)) {
-            if (c.getController() == player) continue;
-            if (cardHasActionableSa(c, paymentMode)) {
-                result.add(c.getView());
+
+        // Normal priority — reuse the APINA heuristic.
+        ActionScan scan = ActionScan.scan(player);
+        if (scan.hasStructuralBailout()) {
+            // We can't say precisely which cards are actionable, but we know
+            // the player has options. Fall back to the simple per-card scan.
+            for (ZoneType zone : ACTIONABLE_ZONES) {
+                for (Card c : player.getCardsIn(zone)) {
+                    if (cardHasAnyPlayableSa(c)) {
+                        result.add(c.getView());
+                    }
+                }
+            }
+            getGui().setWeaklySelectable(result);
+            return;
+        }
+
+        ManaBudget budget = scan.getBudget();
+        for (SpellAbility sa : scan.getSpellsToCheck()) {
+            if (sa.isLandAbility() || (sa.canPlay() && budget.canAfford(sa, scan))) {
+                Card host = sa.getHostCard();
+                if (host != null) {
+                    result.add(host.getView());
+                }
             }
         }
         getGui().setWeaklySelectable(result);
     }
 
-    private boolean cardHasActionableSa(Card c, boolean paymentMode) {
+    private boolean cardHasPlayableManaAbility(Card c) {
         for (SpellAbility sa : c.getAllPossibleAbilities(player, true)) {
-            if (paymentMode && !sa.isManaAbility()) continue;
+            if (sa.isManaAbility() && sa.canPlay()) return true;
+        }
+        return false;
+    }
+
+    private boolean cardHasAnyPlayableSa(Card c) {
+        for (SpellAbility sa : c.getAllPossibleAbilities(player, true)) {
             if (sa.canPlay()) return true;
         }
         return false;
@@ -1562,8 +1601,7 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
         final MagicStack stack = getGame().getStack();
 
         if (FModel.getPreferences().getPrefBoolean(FPref.YIELD_EXPERIMENTAL_OPTIONS) && FModel.getPreferences().getPrefBoolean(FPref.YIELD_AUTO_PASS_NO_ACTIONS)) {
-            int manaEstimate = ComputerUtilMana.getAvailableManaEstimate(getPlayer());
-            getPlayer().getView().updateHasAvailableActions(getPlayer(), manaEstimate);
+            getPlayer().getView().updateHasAvailableActions(getPlayer());
         }
 
         if (mayAutoPass()) {

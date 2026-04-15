@@ -304,6 +304,47 @@ public class CostAdjustment {
     }
     // GetSpellCostChange
 
+    /**
+     * Apply a pre-cached list of cost-modifying static abilities (RaiseCost,
+     * ReduceCost, SetCost) without walking the battlefield or prompting any
+     * controller. Used by the hasAvailableActions heuristic so per-spell
+     * affordability checks don't re-iterate battlefield statics every call.
+     *
+     * The caller is responsible for collecting the static lists once per
+     * priority pass during its own battlefield walk. This method does only
+     * the narrow application work.
+     */
+    public static void applyCachedStatics(final Cost cost, final ManaCostBeingPaid mcbp,
+            final SpellAbility sa,
+            final List<StaticAbility> raiseAbilities,
+            final List<StaticAbility> reduceAbilities,
+            final List<StaticAbility> setAbilities) {
+        if (cost != null && raiseAbilities != null) {
+            for (StaticAbility st : raiseAbilities) {
+                if (checkRequirement(sa, st)) {
+                    applyRaiseCostAbility(cost, sa, st);
+                }
+            }
+        }
+        if (mcbp == null) return;
+        int sumGeneric = 0;
+        if (reduceAbilities != null) {
+            for (StaticAbility st : reduceAbilities) {
+                if (checkRequirement(sa, st)) {
+                    sumGeneric += applyReduceCostAbility(st, sa, mcbp, sumGeneric);
+                }
+            }
+            if (sumGeneric > 0) mcbp.decreaseGenericMana(sumGeneric);
+        }
+        if (setAbilities != null) {
+            for (StaticAbility st : setAbilities) {
+                if (checkRequirement(sa, st)) {
+                    applySetCostAbility(st, sa, mcbp);
+                }
+            }
+        }
+    }
+
     private static boolean adjustCostByAssist(ManaCostBeingPaid cost, final SpellAbility sa, boolean test) {
         // 702.132a Assist is a static ability that modifies the rules of paying for the spell with assist (see rules 601.2g-h).
         // If the total cost to cast a spell with assist includes a generic mana component, before you activate mana abilities while casting it, you may choose another player.
