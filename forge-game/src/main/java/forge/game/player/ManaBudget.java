@@ -171,6 +171,35 @@ public final class ManaBudget {
         int workingTotal = totalMana;
         boolean workingTotalUnbounded = totalUnbounded;
 
+        // Conflict-subtract: if this SA is a non-mana ability whose cost
+        // shares a card-local resource (tap / sac-self / exile-self) with
+        // the host card's mana abilities, the card can't also contribute
+        // mana toward this SA's cost. Example: Abzan Banner's draw is
+        // {W}{B}{G}, {T}, Sac — you can't tap Banner for mana AND pay
+        // the draw's tap. Subtract the card's own mana contribution.
+        // Restless Spire's animate ({U}{R}) has neither tap nor sac-self,
+        // so exclusionGroupOf returns null → no subtraction → Spire's
+        // mana remains available.
+        if (!sa.isManaAbility() && !sa.isSpell() && sa.getHostCard() != null) {
+            forge.game.card.Card host = sa.getHostCard();
+            ActionScan.ExclusionGroup saGroup = ManaAbilityEstimator.exclusionGroupOf(sa);
+            if (saGroup != null) {
+                Integer cardTotal = scan.getCommittedCardTotals().get(host);
+                int[] cardBuckets = scan.getCardBucketContributions().get(host);
+                if (cardTotal != null && cardTotal > 0 && !workingTotalUnbounded) {
+                    long newTotal = (long) workingTotal - (long) cardTotal;
+                    workingTotal = newTotal < 0 ? 0 : (int) newTotal;
+                }
+                if (cardBuckets != null) {
+                    for (int i = 0; i < NUM_BUCKETS; i++) {
+                        if (cardBuckets[i] <= 0) continue;
+                        long newBucket = (long) work[i] - (long) cardBuckets[i];
+                        work[i] = newBucket < 0 ? 0 : (int) newBucket;
+                    }
+                }
+            }
+        }
+
         // Merge restricted contributions whose filter permits this SA.
         for (RestrictedContribution rc : restrictedContribs) {
             boolean permitted;

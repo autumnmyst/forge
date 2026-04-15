@@ -45,6 +45,52 @@ final class ManaAbilityEstimator {
     private ManaAbilityEstimator() {}
 
     /**
+     * Precise model of a mana modifier (High Tide, Mana Reflection, Badgermole
+     * Cub, Caged Sun variants). Applied per-activation during
+     * {@link #foldIntoBudget} to mana abilities whose host matches the
+     * {@code matches} predicate.
+     *
+     * Two composition axes:
+     *  - {@code extraBucketPerAct}: flat additive bonus per activation
+     *    (High Tide: +1 U per Island tap; Badgermole Cub: +1 G per creature tap).
+     *  - {@code multiplier}: multiplicative bonus per activation (Mana
+     *    Reflection: ×2 on permanent taps). Multiple modifiers with the
+     *    same matches compose multiplicatively.
+     *
+     * When a mana ability matches multiple modifiers, flat bonuses add
+     * and multipliers compose via saturating-mul. Stacked Mana Reflections
+     * (2 copies → ×4 output) work correctly because each adds its own
+     * record with multiplier=2, and we compose all matching multipliers.
+     */
+    static final class ManaModifier {
+        final java.util.function.Predicate<SpellAbility> matches;
+        final int[] extraBucketPerAct;
+        final int multiplier;
+        /** Source trigger, if this modifier came from a {@code TapsForMana}
+         *  trigger. Used at application time to look up how many trigger
+         *  doublers apply (Harmonic Prodigy etc.) — deferred to read time
+         *  so walk order doesn't matter. */
+        final forge.game.trigger.Trigger sourceTrigger;
+        /** Host card of the source trigger (for doubler filter evaluation). */
+        final Card sourceHost;
+
+        ManaModifier(java.util.function.Predicate<SpellAbility> matches,
+                     int[] extraBucketPerAct, int multiplier) {
+            this(matches, extraBucketPerAct, multiplier, null, null);
+        }
+
+        ManaModifier(java.util.function.Predicate<SpellAbility> matches,
+                     int[] extraBucketPerAct, int multiplier,
+                     forge.game.trigger.Trigger sourceTrigger, Card sourceHost) {
+            this.matches = matches;
+            this.extraBucketPerAct = extraBucketPerAct;
+            this.multiplier = multiplier;
+            this.sourceTrigger = sourceTrigger;
+            this.sourceHost = sourceHost;
+        }
+    }
+
+    /**
      * A deferred cost-bearing OTMA. Built during Pass 2 instead of being
      * folded immediately into the budget, then admitted (or dropped) by
      * the fixed-point loop in {@link ActionScan#admitPendingCostOtmas}.
@@ -129,7 +175,7 @@ final class ManaAbilityEstimator {
             int dev = devotion[i];
             if (dev > maxDev) maxDev = dev;
         }
-        int manaCost = activationManaCost(sa);
+        int manaCost = activationManaCost(sa, scan);
         int netPerAct = Math.max(0, maxDev - manaCost);
         int net = saturatingMul(cap, netPerAct);
         Card host = sa.getHostCard();
@@ -137,14 +183,18 @@ final class ManaAbilityEstimator {
 
         // Closure that folds the devotion-per-color contributions into the
         // budget. Captured for deferred admission so we don't fold buckets
-        // until we know Nykthos's {2} cost is payable.
+        // until we know Nykthos's {2} cost is payable. Also mirrors the
+        // fold onto the per-card contribution tracker for canAfford's
+        // non-mana-ability conflict-subtraction.
         final int[] devSnapshot = new int[] { devotion[0], devotion[1], devotion[2], devotion[3], devotion[4] };
+        final Card hostRef = host;
         Runnable commitBuckets = () -> {
             for (int i = 0; i < 5; i++) {
                 int dev = devSnapshot[i];
                 if (dev <= 0) continue;
                 long sum = (long) budget.perColor[i] + (long) dev;
                 budget.perColor[i] = sum >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) sum;
+                scan.recordCardBucket(hostRef, i, dev, false);
             }
         };
 
@@ -252,8 +302,9 @@ final class ManaAbilityEstimator {
 
         // "Special" mana producers are exotic shapes that don't fit the
         // per-color bucket model cleanly. Examples from the card catalog:
-        //   - Special DoubleManaInPool (Doubling Cube): doubles whatever's
-        //     in the pool. Output is unbounded relative to current pool.
+        //   - Special DoubleManaInPool (Doubling Cube): handled precisely
+        //     by the post-Pass-2 pool-amplification step in ActionScan.
+        //     Skipped here so it doesn't flip the legacy multiplier fallback.
         //   - Special EnchantedManaCost (Chromatic Orrery-adjacent): reads
         //     the enchanted card's mana cost.
         //   - Special EachColorAmong_Valid: produces one mana per distinct
@@ -261,20 +312,20 @@ final class ManaAbilityEstimator {
         //   - Special EachColoredManaSymbol_Milled: based on milled cards.
         //   - Special ColorIdentity: commander color identity.
         //
-        // Rather than pattern-match each variant precisely, we flag the
-        // scan as having a mana multiplier present. postProcess will then
-        // promote every already-producing color to unbounded and flip
-        // totalUnbounded. This is FP-safe (over-count) but correct in the
-        // sense that the spell's affordability no longer depends on our
-        // ability to predict the exact amount.
+        // Unrecognized Special shapes set the legacy flag (postProcess
+        // flips producing colors to unbounded). DoubleManaInPool is
+        // detected at Pass 1 time and counted in scan.doublingCubeCount.
         if (mp.isSpecialMana()) {
-            scan.manaMultiplierPresent = true;
+            String produced = mp.getOrigProduced();
+            if (produced == null || !produced.contains("DoubleManaInPool")) {
+                scan.manaMultiplierPresent = true;
+            }
             return;
         }
 
         int cap = computeActivationCap(ma, scan);
         int perActivation = resolveAmount(ma, scan);
-        int manaCostPerActivation = activationManaCost(ma);
+        int manaCostPerActivation = activationManaCost(ma, scan);
         foldIntoBudget(ma, mp, cap, perActivation, manaCostPerActivation,
                 budget, routeTapSelfThroughScan ? scan : null);
     }
@@ -286,12 +337,45 @@ final class ManaAbilityEstimator {
      * the gross production before crediting the budget.
      */
     static int activationManaCost(SpellAbility sa) {
+        return activationManaCost(sa, null);
+    }
+
+    /** Mana portion of an activation cost, with optional cost-reducing
+     *  static application. Passing a non-null {@code scan} threads the
+     *  cached reduce/set cost statics through
+     *  {@link forge.game.cost.CostAdjustment#applyCachedStatics}, producing
+     *  the effective cost the player would actually pay. Used by the
+     *  cost-bearing OTMA deferral and Doubling Cube post-process so
+     *  discounts like Goblin Electromancer-style reducers (or any static
+     *  that matches the activation) are honored.
+     *
+     *  FN-safe: on any exception or missing activating player the method
+     *  falls back to the raw printed cost. */
+    static int activationManaCost(SpellAbility sa, ActionScan scan) {
         Cost cost = sa.getPayCosts();
         if (cost == null || cost.hasNoManaCost()) return 0;
         var cpm = cost.getCostMana();
         if (cpm == null) return 0;
         var mana = cpm.getMana();
-        return mana == null ? 0 : mana.getCMC();
+        if (mana == null) return 0;
+        int printedCmc = mana.getCMC();
+        if (scan == null) return printedCmc;
+
+        // Apply discounts. Needs activatingPlayer set for CostAdjustment.
+        boolean needsRestore = sa.getActivatingPlayer() == null;
+        if (needsRestore) sa.setActivatingPlayer(scan.getPlayer());
+        try {
+            forge.game.mana.ManaCostBeingPaid working =
+                    new forge.game.mana.ManaCostBeingPaid(mana);
+            forge.game.cost.CostAdjustment.applyCachedStatics(
+                    null, working, sa,
+                    null, scan.getReduceCostStatics(), scan.getSetCostStatics());
+            return working.getConvertedManaCost();
+        } catch (Throwable ex) {
+            return printedCmc;
+        } finally {
+            if (needsRestore) sa.setActivatingPlayer(null);
+        }
     }
 
     private static AbilityManaPart findManaPart(SpellAbility sa) {
@@ -703,7 +787,60 @@ final class ManaAbilityEstimator {
         for (int v : producedPerBucket) grossPerAct += v;
         if (grossPerAct == 0) grossPerAct = 1; // safety for unrecognized strings
 
-        // Apply each colored contribution to its bucket.
+        // Apply precise mana modifiers (High Tide, Badgermole Cub, Mana
+        // Reflection, etc.). Composition rules:
+        //  - Flat bonuses add: each matching modifier's extraBucketPerAct
+        //    contributes additively to producedPerBucket[i] and grossPerAct.
+        //  - Multipliers compose: multiple ×2 modifiers → ×4, ×8, etc.
+        //    Applied here to the local `multiplier` variable so all
+        //    downstream math (buckets, total, netTotal) sees the composed
+        //    effect uniformly.
+        // Skipped entirely via null-check when no modifiers are in play —
+        // zero overhead on the common fast path.
+        if (scanForTapSelfRouting != null
+                && scanForTapSelfRouting.getManaModifiers() != null) {
+            int[] flatBonus = null;
+            for (ManaModifier mod : scanForTapSelfRouting.getManaModifiers()) {
+                if (!mod.matches.test(sa)) continue;
+                if (mod.multiplier > 1) {
+                    multiplier = saturatingMul(multiplier, mod.multiplier);
+                }
+                if (mod.extraBucketPerAct != null) {
+                    if (flatBonus == null) flatBonus = new int[ManaBudget.NUM_BUCKETS];
+                    // Scale by trigger doubler count (Harmonic Prodigy
+                    // etc.). Lookup happens here, at application time,
+                    // so it doesn't matter whether the doubler was
+                    // discovered before or after this modifier during
+                    // the Pass 1 walk. For modifiers without a source
+                    // trigger (e.g. Mana Reflection), factor stays at 1.
+                    int factor = 1;
+                    if (mod.sourceTrigger != null) {
+                        int doublers = scanForTapSelfRouting.countTriggerDoublers(
+                                mod.sourceTrigger, mod.sourceHost);
+                        factor = 1 + doublers;
+                    }
+                    for (int i = 0; i < ManaBudget.NUM_BUCKETS; i++) {
+                        flatBonus[i] += mod.extraBucketPerAct[i] * factor;
+                    }
+                }
+            }
+            if (flatBonus != null) {
+                // Fold flat bonuses into producedPerBucket so the existing
+                // bucket loop below produces the right output, and into
+                // grossPerAct so netTotal's gross accounting is correct.
+                for (int i = 0; i < ManaBudget.NUM_BUCKETS; i++) {
+                    if (flatBonus[i] > 0) {
+                        producedPerBucket[i] += flatBonus[i];
+                        grossPerAct += flatBonus[i];
+                    }
+                }
+            }
+        }
+
+        // Apply each colored contribution to its bucket. Card-bucket
+        // tracking (for non-mana-ability cost subtraction in canAfford)
+        // is mirrored into the closure below for the cost-bearing path
+        // so dropped records don't leave stale contributions behind.
         for (int i = 0; i < ManaBudget.NUM_BUCKETS; i++) {
             int countPerAct = producedPerBucket[i];
             if (countPerAct <= 0) continue;
@@ -778,6 +915,8 @@ final class ManaAbilityEstimator {
             final int capF = cap;
             final int multF = multiplier;
             final boolean unboundedF = unbounded;
+            final Card hostF = sa.getHostCard();
+            final ActionScan scanF = scanForTapSelfRouting;
             Runnable commitBuckets = () -> {
                 for (int i = 0; i < ManaBudget.NUM_BUCKETS; i++) {
                     int countPerAct = producedSnapshot[i];
@@ -785,12 +924,29 @@ final class ManaAbilityEstimator {
                     int bucketAdd = unboundedF ? Integer.MAX_VALUE
                             : saturatingMul(saturatingMul(capF, multF), countPerAct);
                     applyToColor(targetPerColorRef, targetUnboundedRef, i, bucketAdd, unboundedF);
+                    if (scanF != null && hostF != null) {
+                        scanF.recordCardBucket(hostF, i, bucketAdd, unboundedF);
+                    }
                 }
             };
             scanForTapSelfRouting.addPendingCostOtma(
                     new PendingCostOtma(sa.getHostCard(), excl,
                             manaCostPerActivation, netTotal, unbounded, commitBuckets));
             return;
+        }
+
+        // Record per-card bucket contributions (cost-free path). Cost-bearing
+        // abilities defer this into the closure above so dropped records
+        // don't leave stale contributions. This mirrors the budget.perColor
+        // writes we did at the top of foldIntoBudget.
+        if (scanForTapSelfRouting != null && sa.getHostCard() != null) {
+            for (int i = 0; i < ManaBudget.NUM_BUCKETS; i++) {
+                int countPerAct = producedPerBucket[i];
+                if (countPerAct <= 0) continue;
+                int bucketAdd = unbounded ? Integer.MAX_VALUE
+                        : saturatingMul(saturatingMul(cap, multiplier), countPerAct);
+                scanForTapSelfRouting.recordCardBucket(sa.getHostCard(), i, bucketAdd, unbounded);
+            }
         }
 
         if (excl != null && sa.getHostCard() != null) {

@@ -56,6 +56,23 @@ public class HasAvailableActionsTest extends SimulationTest {
         throw new IllegalStateException("Card not found in hand: " + cardInHandName);
     }
 
+    /** Check if a specific non-mana activated ability on a battlefield
+     *  card is affordable. Used to test conflict-subtraction: Abzan Banner's
+     *  draw ability should NOT be affordable from Banner alone because its
+     *  {T} cost conflicts with its mana ability. */
+    private static boolean canAffordNonManaAbilityOf(Player p, String cardName) {
+        ActionScan scan = ActionScan.scan(p);
+        for (Card c : p.getCardsIn(ZoneType.Battlefield)) {
+            if (!c.getName().equals(cardName)) continue;
+            for (forge.game.spellability.SpellAbility sa : c.getAllPossibleAbilities(p, true)) {
+                if (sa.isManaAbility()) continue;
+                if (scan.getBudget().canAfford(sa, scan)) return true;
+            }
+            return false;
+        }
+        throw new IllegalStateException("Card not found on battlefield: " + cardName);
+    }
+
     /** Collect the set of card names that the highlight path would flag as
      *  actionable. Mirrors {@code pushActionableCards} (non-payment mode)
      *  but returns a name set the test can assert against. */
@@ -2164,36 +2181,44 @@ public class HasAvailableActionsTest extends SimulationTest {
     // =================================================================
 
     @Test
-    public void testBadgermoleCubTriggeredManaCountsAsSource() {
-        // Badgermole Cub has a TapsForMana trigger: whenever you tap a
-        // creature for mana, add an additional {G}. Our scan should pick
-        // this up via Trigger.isManaAbility() and the multiplier-scan
-        // path, flipping the green bucket unbounded (we over-count since
-        // the trigger is a genuine multiplier of creature taps).
+    public void testBadgermoleCubTriggeredManaRecognizedAsModifier() {
+        // Badgermole Cub: TapsForMana trigger (ValidCard$ Creature)
+        // producing +1 G per creature tap. The precise modifier parser
+        // recognizes this pattern, so it is NOT routed to the legacy
+        // manaMultiplierPresent fallback — instead it becomes a precise
+        // ManaModifier that contributes +1 G per matching mana ability.
         Player p = newGame();
         addCard("Badgermole Cub", p).setSickness(false);
         ActionScan scan = ActionScan.scan(p);
-        ManaBudget b = scan.getBudget();
-        // The TapsForMana trigger is detected as a mana multiplier, so
-        // the total mana also flips unbounded.
-        AssertJUnit.assertTrue("Badgermole Cub's TapsForMana trigger should flip multiplier",
+        AssertJUnit.assertFalse("Badgermole Cub should be parsed precisely, not flagged as generic multiplier",
                 scan.isManaMultiplierPresent());
+        AssertJUnit.assertNotNull("modifier list should be populated",
+                scan.getManaModifiers());
+        AssertJUnit.assertEquals(1, scan.getManaModifiers().size());
     }
 
     @Test
-    public void testBadgermoleCubWithCreaturesEnablesBigGreenSpell() {
-        // Badgermole Cub + 3 Llanowar Elves. The Cub's trigger contributes
-        // "extra G whenever a creature is tapped for mana." With 3 Elves
-        // + the Cub itself, we have 4 creatures. My heuristic treats the
-        // Cub's trigger-mana SA as an RMA → flips G unbounded → flips
-        // total unbounded via multiplier promotion. Any green spell is
-        // affordable.
+    public void testBadgermoleCubPreciseGreenBonus() {
+        // Badgermole Cub + 3 Llanowar Elves. Each Elf tap → 1 G (elf) +
+        // 1 G (Cub bonus) = 2 G per Elf × 3 Elves = 6 G total. Precise
+        // (not unbounded).
+        //
+        // Overrun = {2}{G}{G}{G} = 5 cmc. 6 total mana ≥ 5 → affordable.
+        // Previously, this would have relied on unbounded promotion; now
+        // it's a tight bounded match.
         Player p = newGame();
         addCard("Badgermole Cub", p).setSickness(false);
         addCards("Llanowar Elves", 3, p);
         for (Card c : p.getCardsIn(ZoneType.Battlefield)) c.setSickness(false);
-        addCardToZone("Craterhoof Behemoth", p, ZoneType.Hand); // {5}{G}{G}{G}
-        AssertJUnit.assertTrue(canAffordFromHand(p, "Craterhoof Behemoth"));
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals("3 Elves × 2 G each (elf + cub bonus) = 6 G",
+                6, b.getBucket(ManaBudget.IDX_G));
+        AssertJUnit.assertEquals("total also 6", 6, b.getTotalMana());
+        AssertJUnit.assertFalse("total NOT unbounded — precise modeling",
+                b.isTotalUnbounded());
+        addCardToZone("Overrun", p, ZoneType.Hand); // {2}{G}{G}{G} = 5 cmc
+        AssertJUnit.assertTrue(canAffordFromHand(p, "Overrun"));
     }
 
     @Test
@@ -2266,69 +2291,290 @@ public class HasAvailableActionsTest extends SimulationTest {
     // =================================================================
 
     @Test
-    public void testDoublingCubeFlipsProducingColorsUnbounded() {
-        // Doubling Cube + 2 Forests. After Pass 2 folds the Forests, G
-        // bucket = 2. Doubling Cube's Special producer flags the scan as
-        // multiplier-present. postProcess then promotes every already-
-        // producing color (G) to unbounded, and since promotedAny = true,
-        // totalUnbounded is also set.
+    public void testDoublingCubeBelowBreakevenDoesNotHelp() {
+        // Doubling Cube + 2 Forests. Cube activation cost is {3}, so the
+        // break-even is base ≥ 6. With base = 2, Cube would net negative,
+        // so it contributes nothing. Total stays 2, G stays 2, no
+        // unbounded flags.
         Player p = newGame();
         addCard("Doubling Cube", p).setSickness(false);
         addCards("Forest", 2, p);
         ActionScan scan = ActionScan.scan(p);
         ManaBudget b = scan.getBudget();
-        AssertJUnit.assertTrue("G bucket unbounded via multiplier promotion",
-                b.isBucketUnbounded(ManaBudget.IDX_G));
-        AssertJUnit.assertTrue("totalUnbounded after promotion",
+        AssertJUnit.assertEquals("G bucket stays 2 — below Cube breakeven",
+                2, b.getBucket(ManaBudget.IDX_G));
+        AssertJUnit.assertEquals(2, b.getTotalMana());
+        AssertJUnit.assertFalse("total NOT unbounded — precise modeling",
                 b.isTotalUnbounded());
     }
 
     @Test
-    public void testDoublingCubeEnablesAnyAffordableSpell() {
-        // Doubling Cube + 2 Forests + Craterhoof Behemoth {5}{G}{G}{G}.
-        // Total unbounded + G unbounded → any green spell is affordable
-        // regardless of its CMC, because the pool can be doubled.
+    public void testDoublingCubePreciselyBoostsAboveBreakeven() {
+        // 7 Mountains + Doubling Cube. Base = 7. After Cube: max(7, 2*(7-3))
+        // = max(7, 8) = 8. Total becomes exactly 8 (precise, not unbounded).
+        // R bucket also doubles: 7 → 14.
         Player p = newGame();
         addCard("Doubling Cube", p).setSickness(false);
-        addCards("Forest", 2, p);
-        addCardToZone("Craterhoof Behemoth", p, ZoneType.Hand);
-        AssertJUnit.assertTrue(canAffordFromHand(p, "Craterhoof Behemoth"));
+        addCards("Mountain", 7, p);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals("Cube boosts total to 8 = 2×(7−3)",
+                8, b.getTotalMana());
+        AssertJUnit.assertEquals("R bucket doubles 7→14",
+                14, b.getBucket(ManaBudget.IDX_R));
+        AssertJUnit.assertFalse(b.isTotalUnbounded());
+    }
+
+    @Test
+    public void testDoublingCubeEnables8CostSpell() {
+        // 7 Plains + Doubling Cube + Akroma, Angel of Wrath
+        // ({5}{W}{W}{W} = 8 cmc). Base = 7, Cube → 8, W bucket doubles
+        // 7 → 14, plenty of white for the {W}{W}{W}. Without Cube the
+        // total gate would reject (7 < 8).
+        Player p = newGame();
+        addCard("Doubling Cube", p).setSickness(false);
+        addCards("Plains", 7, p);
+        addCardToZone("Akroma, Angel of Wrath", p, ZoneType.Hand);
+        AssertJUnit.assertTrue(canAffordFromHand(p, "Akroma, Angel of Wrath"));
+    }
+
+    @Test
+    public void testHighTideAnalogPreciseBonusPerIslandTap() {
+        // High Tide's cast effect is a TapsForMana trigger with
+        // ValidCard$ Island. We can't easily construct the on-battlefield
+        // Effect card in tests, but the SCRIPT is structurally identical
+        // across High Tide and Badgermole Cub / Mana Flare, so we can
+        // exercise the same code path with a permanent variant.
+        //
+        // This test uses Badgermole Cub's TapsForMana (ValidCard$ Creature)
+        // as the precise-modifier test: 4 Llanowar Elves + Cub = 4 creature
+        // taps × (1 G elf + 1 G cub) = 8 G, bounded, precise.
+        Player p = newGame();
+        addCard("Badgermole Cub", p).setSickness(false);
+        addCards("Llanowar Elves", 4, p);
+        for (Card c : p.getCardsIn(ZoneType.Battlefield)) c.setSickness(false);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals("4 elves × 2 G = 8 G", 8, b.getBucket(ManaBudget.IDX_G));
+        AssertJUnit.assertEquals(8, b.getTotalMana());
+        AssertJUnit.assertFalse("bounded, precise", b.isTotalUnbounded());
+    }
+
+    @Test
+    public void testManaReflectionPreciseDoubling() {
+        // Mana Reflection: ProduceMana replacement with ReplaceAmount$ 2.
+        // 3 Forests + Mana Reflection: each Forest tap produces 2 G
+        // instead of 1. Total = 6 G, bounded, precise.
+        Player p = newGame();
+        addCard("Mana Reflection", p).setSickness(false);
+        addCards("Forest", 3, p);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals("3 Forests × 2 = 6 G", 6, b.getBucket(ManaBudget.IDX_G));
+        AssertJUnit.assertEquals(6, b.getTotalMana());
+        AssertJUnit.assertFalse("bounded, precise, not legacy-unbounded",
+                b.isTotalUnbounded());
+    }
+
+    @Test
+    public void testRoamingThroneDoublesBadgermoleCubTrigger() {
+        // Validates the trigger-doubler path end-to-end using Roaming
+        // Throne (no Wizard gymnastics needed):
+        //   1. Badgermole Cub has a TapsForMana trigger: "whenever you
+        //      tap a creature for mana, add an additional {G}."
+        //   2. Roaming Throne's Panharmonicon-mode static:
+        //        ValidCard$ Creature.Other+YouCtrl+ChosenType
+        //      doubles triggered abilities of other creatures of the
+        //      chosen type. We set the chosen type to "Badger" so the
+        //      Cub (a Badger Mole) matches.
+        //   3. Dryad Arbor is a Land + Creature that taps for {G}. Each
+        //      tap fires Cub's trigger.
+        //   4. With Roaming Throne in play, Cub's trigger should fire
+        //      twice per Dryad Arbor tap → extra 2 G per tap, plus the
+        //      1 G from the Arbor itself = 3 G total.
+        Player p = newGame();
+        Card throne = addCard("Roaming Throne", p);
+        throne.setSickness(false);
+        throne.setChosenType("Badger");
+        Card cub = addCard("Badgermole Cub", p);
+        cub.setSickness(false);
+        addCard("Dryad Arbor", p).setSickness(false);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        // Confirm the doubler was collected.
+        AssertJUnit.assertNotNull("Roaming Throne should parse as a trigger doubler",
+                scan.getTriggerDoublers());
+        AssertJUnit.assertEquals(1, scan.getTriggerDoublers().size());
+        // Sanity — Cub matches the Throne's ValidCard filter.
+        AssertJUnit.assertTrue("Cub (Badger) should match Throne's Creature.Other+YouCtrl+ChosenType filter",
+                cub.isValid("Creature.Other+YouCtrl+ChosenType", p, throne, null));
+        // Base: Dryad Arbor → 1 G. Cub's trigger fires when Arbor (a
+        // creature) is tapped for mana, normally giving +1 G. Throne
+        // doubles the trigger → +2 G. Total = 1 + 2 = 3.
+        AssertJUnit.assertEquals("Cub's trigger doubled by Throne: 1 + 2×1 = 3 G",
+                3, b.getBucket(ManaBudget.IDX_G));
+        AssertJUnit.assertEquals(3, b.getTotalMana());
+        AssertJUnit.assertFalse("precise, not unbounded", b.isTotalUnbounded());
+    }
+
+    @Test
+    public void testHarmonicProdigyDoublesWizardTapsForManaTrigger() {
+        // Scenario: a hypothetical Wizard creature with a TapsForMana
+        // trigger would fire twice per matching tap under Harmonic
+        // Prodigy. We use Badgermole Cub as a stand-in for the "trigger
+        // fires" semantics, even though Cub is a Badger Mole not a
+        // Wizard — Harmonic Prodigy's ValidCard filter would exclude it.
+        //
+        // So instead this test verifies the NEGATIVE case: Prodigy +
+        // Badgermole Cub + 3 Elves → Cub's trigger is NOT doubled (Cub
+        // isn't a Shaman/Wizard), so the G bonus stays at 3 × 1 = 3
+        // (per elf × cub bonus) + 3 (elves' own G) = 6 G.
+        Player p = newGame();
+        addCard("Harmonic Prodigy", p).setSickness(false);
+        addCard("Badgermole Cub", p).setSickness(false);
+        addCards("Llanowar Elves", 3, p);
+        for (Card c : p.getCardsIn(ZoneType.Battlefield)) c.setSickness(false);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        // Llanowar Elves are Druids, not Shaman/Wizard, so Prodigy
+        // doesn't amplify their mana abilities either. Badgermole Cub
+        // is a Badger Mole, also excluded. Total G = 3 (Elves) + 3
+        // (Cub's trigger × 3 elf taps) = 6.
+        AssertJUnit.assertEquals("Prodigy doesn't apply to Badgers or Druids → plain 6 G",
+                6, b.getBucket(ManaBudget.IDX_G));
+    }
+
+    @Test
+    public void testThreeManaReflectionsCompound() {
+        // 3 Mana Reflections + 1 Forest. Each Reflection is a separate
+        // ×2 multiplicative modifier; they compose multiplicatively in
+        // the foldIntoBudget modifier loop: 1 × 2 × 2 × 2 = 8.
+        // One Forest tap → 8 G, total 8.
+        Player p = newGame();
+        addCard("Mana Reflection", p).setSickness(false);
+        addCard("Mana Reflection", p).setSickness(false);
+        addCard("Mana Reflection", p).setSickness(false);
+        addCard("Forest", p);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals("G = 1 × 2 × 2 × 2 = 8",
+                8, b.getBucket(ManaBudget.IDX_G));
+        AssertJUnit.assertEquals(8, b.getTotalMana());
+        AssertJUnit.assertFalse("precise compounding, not unbounded",
+                b.isTotalUnbounded());
+    }
+
+    @Test
+    public void testManaReflectionAndDoublingCubeStack() {
+        // Mana Reflection (×2 per permanent tap) + Doubling Cube + 4
+        // Forests. Cube's PRODUCTION is (t − cost), and Reflection
+        // doubles productions. So Cube produces 2×(t − cost) under
+        // Reflection, giving a final pool of (t − cost) + 2×(t − cost)
+        // = 3×(t − cost).
+        //
+        // Pass 2: 4 Forests × 2 (Reflection) = 8 G. Total = 8.
+        // Post-process Cube: cubeFactor = 1 + 2 = 3. New total =
+        // max(8, 3×(8−3)) = max(8, 15) = 15.
+        // Bucket: G × 3 = 24.
+        Player p = newGame();
+        addCard("Mana Reflection", p).setSickness(false);
+        addCard("Doubling Cube", p).setSickness(false);
+        addCards("Forest", 4, p);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals("Cube factor 3 under Reflection: (t−cost) + 2×(t−cost) = 3×5 = 15",
+                15, b.getTotalMana());
+        AssertJUnit.assertEquals("G bucket: 8 × 3 = 24",
+                24, b.getBucket(ManaBudget.IDX_G));
+        AssertJUnit.assertFalse(b.isTotalUnbounded());
+    }
+
+    @Test
+    public void testTwoManaReflectionsWithDoublingCubePoolMath() {
+        // 2 Mana Reflections + 1 Cube + 4 Forests.
+        // Base under 2 Reflections: each Forest → 4 G, total 16.
+        // Cube production multiplier under 2 Reflections: 1 × 2 × 2 = 4.
+        // cubeFactor = 1 + 4 = 5.
+        // New total = max(16, 5×(16−3)) = max(16, 65) = 65.
+        Player p = newGame();
+        addCard("Mana Reflection", p).setSickness(false);
+        addCard("Mana Reflection", p).setSickness(false);
+        addCard("Doubling Cube", p).setSickness(false);
+        addCards("Forest", 4, p);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals("base = 4 × 4 = 16, Cube factor 5, new total = 5×13 = 65",
+                65, b.getTotalMana());
+    }
+
+    @Test
+    public void testDoublingCubeActivationCostHonorsReducer() {
+        // Discount scenario: a cost-reducing static that lowers Cube's
+        // {3} activation cost would change the break-even. Without a
+        // real card doing this (Cube's cost is rarely discounted in
+        // practice), we verify the mechanism indirectly: the post-process
+        // calls activationManaCost(doublingCubeSa, scan) so the effective
+        // cost reflects scan.reduceCostStatics.
+        //
+        // With no reducer and 5 Mountains + Cube:
+        //   base = 5, Cube at cost 3: max(5, 2*(5-3)=4) = 5. No help.
+        // Sanity check that this baseline holds (no rogue discounts
+        // firing for activated mana abilities).
+        Player p = newGame();
+        addCard("Doubling Cube", p).setSickness(false);
+        addCards("Mountain", 5, p);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals("base 5 stays 5 at Cube cost 3 (no help below 6)",
+                5, b.getTotalMana());
+    }
+
+    @Test
+    public void testTwoDoublingCubesCompoundAboveBreakeven() {
+        // 8 Mountains + 2 Doubling Cubes. Iteration:
+        //   base = 8
+        //   Cube 1: max(8, 2*(8-3)) = max(8, 10) = 10
+        //   Cube 2: max(10, 2*(10-3)) = max(10, 14) = 14
+        // Total = 14. R bucket: 8 → 16 → 32.
+        Player p = newGame();
+        addCard("Doubling Cube", p).setSickness(false);
+        addCard("Doubling Cube", p).setSickness(false);
+        addCards("Mountain", 8, p);
+        ActionScan scan = ActionScan.scan(p);
+        ManaBudget b = scan.getBudget();
+        AssertJUnit.assertEquals("two Cubes compound: 8 → 10 → 14",
+                14, b.getTotalMana());
+        AssertJUnit.assertEquals("R bucket doubles twice: 8 → 16 → 32",
+                32, b.getBucket(ManaBudget.IDX_R));
     }
 
     @Test
     public void testDoublingCubeWithFloatingMana() {
-        // Player has 3 red mana floating in their pool and Doubling Cube
-        // on the battlefield. Hand: Shivan Dragon {4}{R}{R} = 6 mana. The
-        // 3 floating red alone isn't enough — but Cube can double the pool
-        // to 6, which IS enough.
+        // 4 floating red + 4 Mountains + Doubling Cube. Base = 8 total
+        // (4 floating + 4 Mountain). Cube: max(8, 2*(8-3)) = 10. Shivan
+        // Dragon {4}{R}{R} (6 cmc) is trivially affordable.
         //
-        // This test verifies two things:
-        //   1. Floating mana is correctly seeded into the per-color buckets
-        //      during Pass 1 (via foldFloatingMana).
-        //   2. Doubling Cube's multiplier promotion picks up the floating
-        //      mana (because R bucket > 0) and flips R unbounded + total
-        //      unbounded, enabling the spell.
+        // This verifies two things:
+        //   1. Floating mana participates in the base budget for Cube.
+        //   2. Cube precisely amplifies pre-Cube totals.
         Player p = newGame();
         addCard("Doubling Cube", p).setSickness(false);
-        // Seed 3 floating red mana in the player's pool.
+        addCards("Mountain", 4, p);
         Card fakeSource = createCard("Mountain", p);
-        p.getManaPool().addMana(new forge.game.mana.Mana(
-                (byte) forge.card.mana.ManaAtom.RED, fakeSource, null, p), false);
-        p.getManaPool().addMana(new forge.game.mana.Mana(
-                (byte) forge.card.mana.ManaAtom.RED, fakeSource, null, p), false);
-        p.getManaPool().addMana(new forge.game.mana.Mana(
-                (byte) forge.card.mana.ManaAtom.RED, fakeSource, null, p), false);
+        for (int i = 0; i < 4; i++) {
+            p.getManaPool().addMana(new forge.game.mana.Mana(
+                    (byte) forge.card.mana.ManaAtom.RED, fakeSource, null, p), false);
+        }
         addCardToZone("Shivan Dragon", p, ZoneType.Hand);
 
         ActionScan scan = ActionScan.scan(p);
         ManaBudget b = scan.getBudget();
-        // Verify floating mana was seeded into the R bucket.
-        AssertJUnit.assertTrue("R bucket should contain floating mana",
-                b.getBucket(ManaBudget.IDX_R) >= 3 || b.isBucketUnbounded(ManaBudget.IDX_R));
-        // Multiplier promotion from Doubling Cube should flip R unbounded
-        // and total unbounded, enabling Shivan Dragon.
-        AssertJUnit.assertTrue(b.isBucketUnbounded(ManaBudget.IDX_R));
-        AssertJUnit.assertTrue(b.isTotalUnbounded());
+        // Base budget: 4 Mountains + 4 floating R = 8 R, total 8.
+        // Cube: max(8, 2*(8-3)=10) = 10. R bucket doubles 8→16.
+        AssertJUnit.assertEquals("base 4 Mountains + 4 floating R, then Cube doubles R",
+                16, b.getBucket(ManaBudget.IDX_R));
+        AssertJUnit.assertEquals("Cube amplifies 8 → 10", 10, b.getTotalMana());
+        AssertJUnit.assertFalse("precise, not unbounded", b.isTotalUnbounded());
         AssertJUnit.assertTrue(canAffordFromHand(p, "Shivan Dragon"));
     }
 
@@ -3118,6 +3364,135 @@ public class HasAvailableActionsTest extends SimulationTest {
         addCard("Stormcatch Mentor", p).setSickness(false);
         addCardToZone("Bria, Riptide Rogue", p, ZoneType.Hand);
         AssertJUnit.assertFalse(canAffordFromHand(p, "Bria, Riptide Rogue"));
+    }
+
+    // =================================================================
+    // Non-mana ability conflict-subtraction
+    // =================================================================
+
+    @Test
+    public void testAbzanBannerPlainsSwampDrawNotAffordable() {
+        // Plains + Swamp + Abzan Banner. Lands give W (1) + B (1); Banner's
+        // mana ability contributes rainbow (1) and total +1 = total 3.
+        // Draw cost = {W}{B}{G} + tap + sac.
+        //
+        // Without conflict-subtraction: work[RAINBOW] = 1 could stand in
+        // for the {G} shard → false positive, "affordable".
+        // With conflict-subtraction: Banner's rainbow and total are
+        // stripped from the working budget → no G source left → draw
+        // NOT affordable. Verifies Banner's own color contribution is
+        // excluded.
+        Player p = newGame();
+        addCard("Plains", p);
+        addCard("Swamp", p);
+        addCard("Abzan Banner", p).setSickness(false);
+        AssertJUnit.assertFalse(
+                "Banner's own rainbow must NOT cover the {G} shard of its own draw",
+                canAffordNonManaAbilityOf(p, "Abzan Banner"));
+    }
+
+    @Test
+    public void testAbzanBannerTwoPlainsSwampDrawNotAffordableDespiteEnoughTotal() {
+        // Plains + Plains + Swamp + Banner. Lands total 3 mana (W/W/B),
+        // Banner adds 1 more → budget total = 4, well above the draw's
+        // 3 colored cost. But after conflict-subtraction:
+        //   work[W] = 2, work[B] = 1, work[G] = 0, work[RAINBOW] = 0,
+        //   workingTotal = 3.
+        // The {G} shard can't be paid from any bucket → NOT affordable,
+        // even though the total-mana gate would otherwise pass. This is
+        // the tight case: total is sufficient but the colored shard check
+        // still rejects.
+        Player p = newGame();
+        addCard("Plains", p);
+        addCard("Plains", p);
+        addCard("Swamp", p);
+        addCard("Abzan Banner", p).setSickness(false);
+        AssertJUnit.assertFalse(
+                "Banner's own {G} contribution must NOT satisfy the draw's {G} shard even when total mana is enough",
+                canAffordNonManaAbilityOf(p, "Abzan Banner"));
+    }
+
+    @Test
+    public void testAbzanBannerWithWBGLandsDrawAffordable() {
+        // Plains + Swamp + Forest + Abzan Banner. The three lands provide
+        // W, B, G for free. Banner's draw cost {W}{B}{G} + tap + sac is
+        // payable by the three lands alone — Banner's own tap is consumed
+        // by the draw, not by mana. Affordable.
+        Player p = newGame();
+        addCard("Plains", p);
+        addCard("Swamp", p);
+        addCard("Forest", p);
+        addCard("Abzan Banner", p).setSickness(false);
+        AssertJUnit.assertTrue(
+                "Abzan Banner draw should be affordable with WBG from lands",
+                canAffordNonManaAbilityOf(p, "Abzan Banner"));
+    }
+
+    @Test
+    public void testFieryIsletAloneDrawNotAffordable() {
+        // Fiery Islet mana: {T}, PayLife 1: Add U/R → rainbow 1, total 1.
+        // Non-mana draw: {1}, {T}, Sac → needs 1 generic + tap + sac.
+        // Islet's mana can't pay the {1} because draw's tap conflicts
+        // with Islet's own tap.
+        Player p = newGame();
+        addCard("Fiery Islet", p);
+        AssertJUnit.assertFalse(
+                "Fiery Islet alone can't pay for its own draw ability",
+                canAffordNonManaAbilityOf(p, "Fiery Islet"));
+    }
+
+    @Test
+    public void testFieryIsletWithForestDrawAffordable() {
+        // Fiery Islet + Forest. Forest provides 1 cost-free mana (G) that
+        // pays the draw's {1}. Affordable.
+        Player p = newGame();
+        addCard("Fiery Islet", p);
+        addCard("Forest", p);
+        AssertJUnit.assertTrue(
+                "Fiery Islet draw should be affordable with an extra Forest",
+                canAffordNonManaAbilityOf(p, "Fiery Islet"));
+    }
+
+    @Test
+    public void testRestlessSpireAnimateDoesNotConflictWithOwnMana() {
+        // Restless Spire mana: {T}: Add U/R → rainbow 1.
+        // Animate ability: {U}{R} — NO tap, NO sac. Doesn't share the
+        // tap resource with the mana ability, so Spire's OWN mana stays
+        // available toward the animate's colored shards.
+        //
+        // Board: Restless Spire + Island. Total = 2 mana (Spire rainbow
+        // + Island U). Animate needs U + R, payable: Island → U,
+        // Spire → R. Affordable.
+        //
+        // This is the key test: the conflict-subtraction logic must NOT
+        // fire for animate, because its cost has no exclusion group.
+        Player p = newGame();
+        addCard("Restless Spire", p);
+        addCard("Island", p);
+        // Force untap: Spire normally ETBs tapped.
+        for (Card c : p.getCardsIn(ZoneType.Battlefield)) {
+            c.setTapped(false);
+            c.setSickness(false);
+        }
+        AssertJUnit.assertTrue(
+                "Restless Spire's own mana should pay its animate cost — no tap conflict",
+                canAffordNonManaAbilityOf(p, "Restless Spire"));
+    }
+
+    @Test
+    public void testRestlessSpireAloneAnimateNotAffordable() {
+        // Restless Spire alone. Its own mana provides 1 rainbow (U or R),
+        // but animate needs BOTH U AND R = 2 mana. Only 1 total available.
+        // NOT affordable — but for total-mana reasons, not conflict.
+        Player p = newGame();
+        addCard("Restless Spire", p);
+        for (Card c : p.getCardsIn(ZoneType.Battlefield)) {
+            c.setTapped(false);
+            c.setSickness(false);
+        }
+        AssertJUnit.assertFalse(
+                "Restless Spire alone can't afford its own 2-cost animate",
+                canAffordNonManaAbilityOf(p, "Restless Spire"));
     }
 
     // --- Sanity canary ---

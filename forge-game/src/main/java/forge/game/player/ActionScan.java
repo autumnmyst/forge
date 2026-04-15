@@ -20,6 +20,7 @@ import forge.game.cost.CostUntap;
 import forge.game.mana.ManaPool;
 import forge.game.replacement.ReplacementEffect;
 import forge.game.replacement.ReplacementType;
+import forge.game.spellability.AbilityManaPart;
 import forge.game.spellability.AbilitySub;
 import forge.game.spellability.SpellAbility;
 import forge.game.staticability.StaticAbility;
@@ -95,6 +96,75 @@ public final class ActionScan {
     // ------------------------------------------------------------------
     boolean manaMultiplierPresent;
     boolean allColorsFungible;
+
+    /** Lazily-initialized list of precisely-modeled mana modifiers (High
+     *  Tide, Badgermole Cub, Mana Reflection, etc.). Null when none are
+     *  in play — the common case — so the fast path pays one null check
+     *  per mana ability. */
+    List<ManaAbilityEstimator.ManaModifier> manaModifiers;
+
+    /** Number of untapped Doubling Cube copies on the battlefield under
+     *  the player's control. Each one can double the pool once per turn
+     *  for a {3} activation cost. Zero = no post-pool amplification. */
+    int doublingCubeCount;
+
+    /** First-seen Doubling Cube mana ability reference, used at
+     *  post-process time to compute the effective activation cost via
+     *  {@link ManaAbilityEstimator#activationManaCost(SpellAbility, ActionScan)}.
+     *  The cost computation is deferred to postProcess so it sees the
+     *  complete reducer-static list. */
+    SpellAbility doublingCubeSa;
+
+    /** Trigger-count doublers that affect non-ETB triggers. A
+     *  {@code StaticAbilityMode.Panharmonicon} whose {@code ValidMode$}
+     *  allows {@code TapsForMana} (or is absent → applies to all
+     *  triggers) gets collected here. Panharmonicon itself filters
+     *  {@code ValidMode$ ChangesZone,ChangesZoneAll} → excluded.
+     *  Harmonic Prodigy has no ValidMode → included, applies to any
+     *  trigger on a Shaman/Wizard.
+     *
+     *  Each entry stores the filter predicate so we can check per-trigger
+     *  applicability. Multiple doublers compose additively: with N
+     *  matching doublers, a trigger fires {@code 1 + N} times. */
+    List<TriggerDoubler> triggerDoublers;
+
+    static final class TriggerDoubler {
+        final java.util.function.BiPredicate<Trigger, Card> appliesTo;
+        TriggerDoubler(java.util.function.BiPredicate<Trigger, Card> appliesTo) {
+            this.appliesTo = appliesTo;
+        }
+    }
+
+    public List<TriggerDoubler> getTriggerDoublers() { return triggerDoublers; }
+
+    void addTriggerDoubler(TriggerDoubler td) {
+        if (triggerDoublers == null) triggerDoublers = new ArrayList<>();
+        triggerDoublers.add(td);
+    }
+
+    /** Count how many trigger doublers apply to a given trigger fired
+     *  by a given host card. Used by {@code computeActivationCap} to
+     *  scale the cap of triggered mana abilities. Returns 0 (and does
+     *  nothing) when no doublers are in play — the fast path. */
+    public int countTriggerDoublers(Trigger t, Card host) {
+        if (triggerDoublers == null || triggerDoublers.isEmpty()) return 0;
+        int n = 0;
+        for (TriggerDoubler td : triggerDoublers) {
+            try {
+                if (td.appliesTo.test(t, host)) n++;
+            } catch (Throwable ignored) {}
+        }
+        return n;
+    }
+
+    public List<ManaAbilityEstimator.ManaModifier> getManaModifiers() {
+        return manaModifiers;
+    }
+
+    void addManaModifier(ManaAbilityEstimator.ManaModifier mod) {
+        if (manaModifiers == null) manaModifiers = new ArrayList<>();
+        manaModifiers.add(mod);
+    }
 
     // ------------------------------------------------------------------
     // Permanent / zone counts (immutable via mana abilities)
@@ -246,6 +316,32 @@ public final class ActionScan {
      *  during the Pass 2 commit step; re-read and updated in-place by the
      *  fixed-point loop when a deferred cost-bearing OTMA gets admitted. */
     final Map<Card, Integer> committedCardTotals = new HashMap<>();
+
+    /** Running per-card bucket contributions, recorded every time a mana
+     *  ability's bucket fold lands. Used by {@code ManaBudget.canAfford}
+     *  to subtract a card's own mana contribution when checking a
+     *  non-mana ability on that card whose cost conflicts with its mana
+     *  (e.g. Abzan Banner's draw ability taps and sacs the card — you
+     *  can't also use Banner for mana to pay the draw's WBG cost). */
+    final Map<Card, int[]> cardBucketContributions = new HashMap<>();
+
+    public Map<Card, Integer> getCommittedCardTotals() { return committedCardTotals; }
+    public Map<Card, int[]> getCardBucketContributions() { return cardBucketContributions; }
+
+    /** Accumulate a per-activation bucket contribution onto the per-card
+     *  contribution tracker. Called alongside {@code applyToColor} in
+     *  ManaAbilityEstimator so the tracker mirrors what lands in
+     *  {@code budget.perColor}. Saturates on overflow. */
+    void recordCardBucket(Card host, int bucketIdx, int amount, boolean unbounded) {
+        if (host == null) return;
+        int[] acc = cardBucketContributions.computeIfAbsent(host, k -> new int[ManaBudget.NUM_BUCKETS]);
+        if (unbounded) {
+            acc[bucketIdx] = Integer.MAX_VALUE;
+            return;
+        }
+        long sum = (long) acc[bucketIdx] + (long) amount;
+        acc[bucketIdx] = sum >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) sum;
+    }
     /** Cards whose contribution has already flipped to unbounded in a prior
      *  commit pass. Prevents the fixed-point loop from accidentally touching
      *  {@code budget.totalMana} for a card that's already been folded into
@@ -312,6 +408,7 @@ public final class ActionScan {
     public Delta getHandSizeDelta() { return handSizeDelta; }
     public int[] getDevotion() { return devotion; }
     public boolean isManaMultiplierPresent() { return manaMultiplierPresent; }
+    public int getDoublingCubeCount() { return doublingCubeCount; }
 
     public Player getPlayer() {
         return player;
@@ -620,10 +717,91 @@ public final class ActionScan {
     }
 
     private void postProcess() {
-        // Multiplier promotion: if Mana Reflection / High Tide / etc. is in
-        // play, every color we're already producing gets promoted to
-        // unbounded, AND the total mana also goes unbounded (multipliers
-        // create mana, so the overall budget can be arbitrarily large).
+        // Doubling Cube post-pool amplification. Each Cube activation
+        // costs {3} and doubles the pool. Applied iteratively (each Cube
+        // once). Below the break-even of 6 the max clamps to base (no
+        // help); above 6 each Cube grows the effective total.
+        //
+        // Per-color buckets are doubled (upper bound — color reachability
+        // rather than a precise split). Cube does NOT touch the per-card
+        // contribution tracker because the bonus isn't attributable to
+        // any one card's production.
+        if (doublingCubeCount > 0 && !budget.totalUnbounded) {
+            // Effective activation cost (with cost-reducing statics
+            // applied). Default is the printed 3. Computed here after
+            // the walk because reduceCostStatics is fully populated at
+            // this point.
+            int cubeCost = doublingCubeSa != null
+                    ? ManaAbilityEstimator.activationManaCost(doublingCubeSa, this)
+                    : 3;
+            // Cube is a tap-for-mana ability on a permanent. Its effect
+            // "double unspent mana" means: after paying the {3} cost,
+            // Cube PRODUCES (t - cost) new mana and adds it to the
+            // existing (t - cost). Final pool = (t - cost) + production.
+            //
+            // Under Mana Reflection (×2 on permanent taps), Cube's
+            // production is doubled: production = 2*(t - cost). Final
+            // pool = (t - cost) + 2*(t - cost) = 3*(t - cost).
+            //
+            // Two Reflections compound on production → 4*(t - cost),
+            // so pool = 5*(t - cost). Not 4× (my earlier mistake) —
+            // Cube's native doubling isn't a multiplier on production,
+            // it's the fact that pool = original + production.
+            //
+            // Start productionMult at 1 (Cube natively produces
+            // 1×(t - cost)). Compose each matching modifier into it.
+            // Then cubeFactor = 1 + productionMult = pool multiplier.
+            int productionMult = 1;
+            if (manaModifiers != null && doublingCubeSa != null) {
+                for (ManaAbilityEstimator.ManaModifier mod : manaModifiers) {
+                    if (mod.multiplier <= 1) continue;
+                    try {
+                        if (mod.matches.test(doublingCubeSa)) {
+                            long composed = (long) productionMult * (long) mod.multiplier;
+                            productionMult = composed >= Integer.MAX_VALUE
+                                    ? Integer.MAX_VALUE : (int) composed;
+                        }
+                    } catch (Throwable ignored) {}
+                }
+            }
+            int cubeFactor = productionMult == Integer.MAX_VALUE
+                    ? Integer.MAX_VALUE : 1 + productionMult;
+            // Count the Cubes that actually help (each helps iff the
+            // current running total is above the break-even, i.e.
+            // factor×(t - cost) > t → t > cost × factor / (factor - 1)).
+            // Below the break-even, the max clamps to t and the Cube is
+            // a no-op. This count drives bucket-doubling — we only
+            // double colors for Cubes that amplified something.
+            int t = budget.totalMana;
+            int helpfulCubes = 0;
+            for (int i = 0; i < doublingCubeCount; i++) {
+                long boosted = (long) cubeFactor * (long) (t - cubeCost);
+                if (boosted > t) {
+                    t = boosted >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) boosted;
+                    helpfulCubes++;
+                } else {
+                    break; // further Cubes can't help either
+                }
+            }
+            budget.totalMana = t;
+            if (helpfulCubes > 0) {
+                for (int i = 0; i < ManaBudget.NUM_BUCKETS; i++) {
+                    if (budget.perColor[i] > 0 && !budget.unbounded[i]) {
+                        int bucket = budget.perColor[i];
+                        for (int j = 0; j < helpfulCubes; j++) {
+                            long mult = (long) bucket * (long) cubeFactor;
+                            bucket = mult >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) mult;
+                        }
+                        budget.perColor[i] = bucket;
+                    }
+                }
+            }
+        }
+
+        // Multiplier promotion: legacy fallback for unrecognized mana
+        // modifiers that couldn't be parsed into the precise modifier
+        // list. Every color we're already producing gets promoted to
+        // unbounded, AND the total mana also goes unbounded.
         if (manaMultiplierPresent) {
             boolean promotedAny = false;
             for (int i = 0; i < ManaBudget.NUM_BUCKETS; i++) {
@@ -725,10 +903,16 @@ public final class ActionScan {
             if (structuralBailout) return;
         }
 
-        // Triggered mana abilities (Lotus Cobra, Badgermole Cub, etc.) only on battlefield.
+        // Triggered mana abilities (Lotus Cobra etc.) only on battlefield.
+        // TapsForMana triggers (High Tide, Badgermole Cub, Mana Flare)
+        // are reactions to OTHER mana abilities, not primary sources —
+        // they're already handled upstream in scanCardReplacementsAndStatics
+        // as ManaModifier records (or the legacy multiplier fallback).
+        // Skip them here so they don't double-count.
         if (zone == ZoneType.Battlefield) {
             for (Trigger t : c.getTriggers()) {
                 if (!t.isManaAbility()) continue;
+                if (t.getMode() == TriggerType.TapsForMana) continue;
                 SpellAbility trigSa = t.ensureAbility();
                 if (trigSa == null) continue;
                 recordManaAbility(trigSa);
@@ -760,14 +944,30 @@ public final class ActionScan {
     }
 
     private void scanCardReplacementsAndStatics(Card c) {
-        // Event=ProduceMana replacements → mana multiplier present (Mana Reflection,
-        // Caged Sun, Mirari's Wake, Gauntlet of Power, Extraplanar Lens).
-        if (!manaMultiplierPresent) {
-            for (ReplacementEffect re : c.getReplacementEffects()) {
-                if (re.getMode() == ReplacementType.ProduceMana) {
+        // Event=ProduceMana replacements → try to parse into a precise
+        // multiplicative ManaModifier (Mana Reflection = ×2 on permanent
+        // taps). If we can't parse the shape cleanly, fall back to the
+        // legacy global multiplier flag (which flips buckets to unbounded).
+        for (ReplacementEffect re : c.getReplacementEffects()) {
+            if (re.getMode() == ReplacementType.ProduceMana) {
+                if (!tryParseProduceManaReplacement(c, re)) {
                     manaMultiplierPresent = true;
-                    break;
                 }
+            }
+        }
+        // Doubling Cube: {3}, {T}: Add Special DoubleManaInPool. Count
+        // copies in play for the post-Pass-2 pool-doubling step.
+        // Effective activation cost (with reducer statics applied) is
+        // computed later in postProcess when the full static list is
+        // available.
+        for (SpellAbility ab : c.getManaAbilities()) {
+            AbilityManaPart mp = ab.getManaPart();
+            if (mp == null || !mp.isSpecialMana()) continue;
+            String produced = mp.getOrigProduced();
+            if (produced != null && produced.contains("DoubleManaInPool")) {
+                doublingCubeCount++;
+                if (doublingCubeSa == null) doublingCubeSa = ab;
+                break; // one per card
             }
         }
         ZoneType currentZone = c.getZone() != null ? c.getZone().getZoneType() : null;
@@ -779,6 +979,9 @@ public final class ActionScan {
         for (StaticAbility sa : c.getStaticAbilities()) {
             var modes = sa.getMode();
             if (modes.contains(StaticAbilityMode.ManaConvert)) allColorsFungible = true;
+            if (modes.contains(StaticAbilityMode.Panharmonicon)) {
+                tryCollectTriggerDoubler(sa);
+            }
             java.util.Set<ZoneType> active = sa.getActiveZone();
             boolean zoneOk = active == null || currentZone == null || active.contains(currentZone);
             if (!zoneOk) continue;
@@ -786,15 +989,186 @@ public final class ActionScan {
             if (modes.contains(StaticAbilityMode.RaiseCost)) raiseCostStatics.add(sa);
             if (modes.contains(StaticAbilityMode.SetCost)) setCostStatics.add(sa);
         }
-        // TapsForMana triggers whose override is a mana ability (High Tide, Mana Flare).
-        if (!manaMultiplierPresent) {
-            for (Trigger t : c.getTriggers()) {
-                if (t.getMode() == TriggerType.TapsForMana && t.isManaAbility()) {
+        // TapsForMana triggers with a DB$ Mana subability (High Tide,
+        // Badgermole Cub, Mana Flare). Try to parse into a precise
+        // flat-bonus ManaModifier; fall back to the global flag on
+        // unrecognized shapes.
+        for (Trigger t : c.getTriggers()) {
+            if (t.getMode() == TriggerType.TapsForMana && t.isManaAbility()) {
+                if (!tryParseTapsForManaTrigger(t)) {
                     manaMultiplierPresent = true;
-                    break;
                 }
             }
         }
+    }
+
+    /** Parse a {@code TapsForMana} trigger with a {@code DB$ Mana}
+     *  subability into a {@link ManaAbilityEstimator.ManaModifier} with
+     *  a {@code ValidCard$} filter matcher. Returns true on success,
+     *  false if the shape isn't recognized (caller will fall back).
+     *  Trigger doublers on the same host get folded in here: each matching
+     *  TriggerDoubler multiplies the flat bonus by {@code (1 + count)}. */
+    private boolean tryParseTapsForManaTrigger(Trigger t) {
+        String validCard = t.getParam("ValidCard");
+        if (validCard == null) return false;
+        SpellAbility action;
+        try {
+            action = t.ensureAbility();
+        } catch (Throwable ex) {
+            return false;
+        }
+        if (action == null || action.getApi() != forge.game.ability.ApiType.Mana) return false;
+        String produced = action.getParamOrDefault("Produced", "");
+        if (produced.isEmpty() || produced.equals("Chosen")
+                || produced.contains("Special") || produced.contains("Combo")) {
+            // Unrecognized — give up on precise parsing.
+            return false;
+        }
+        int amount;
+        try {
+            amount = Integer.parseInt(action.getParamOrDefault("Amount", "1"));
+        } catch (NumberFormatException ex) {
+            return false;
+        }
+        int[] bonus = new int[ManaBudget.NUM_BUCKETS];
+        for (String tok : produced.trim().split("\\s+")) {
+            switch (tok) {
+                case "W": bonus[ManaBudget.W] += amount; break;
+                case "U": bonus[ManaBudget.U] += amount; break;
+                case "B": bonus[ManaBudget.B] += amount; break;
+                case "R": bonus[ManaBudget.R] += amount; break;
+                case "G": bonus[ManaBudget.G] += amount; break;
+                case "C": bonus[ManaBudget.C] += amount; break;
+                default: return false;
+            }
+        }
+        // Build the matcher. The trigger fires whenever a card matching
+        // ValidCard is tapped for mana, so we match mana abilities whose
+        // host card satisfies the Valid expression and whose cost uses
+        // CostTap.
+        // Bonus is NOT pre-scaled with trigger doubler counts — that's
+        // done at application time (foldIntoBudget) so walk order
+        // doesn't matter. The modifier stores the source trigger to
+        // enable that deferred lookup.
+        final String validCardF = validCard;
+        java.util.function.Predicate<SpellAbility> matches = sa -> {
+            if (sa.getHostCard() == null) return false;
+            if (!hasCostTap(sa)) return false;
+            try {
+                return sa.getHostCard().isValid(validCardF, getPlayer(), sa.getHostCard(), sa);
+            } catch (Throwable ex) {
+                return false;
+            }
+        };
+        addManaModifier(new ManaAbilityEstimator.ManaModifier(
+                matches, bonus, 1, t, t.getHostCard()));
+        return true;
+    }
+
+    /** Parse an {@code Event=ProduceMana} replacement effect into a
+     *  multiplicative {@link ManaAbilityEstimator.ManaModifier}. Handles
+     *  the Mana-Reflection-style {@code DB$ ReplaceMana ReplaceAmount$ N}
+     *  shape via both {@code getOverridingAbility()} (if resolved) and
+     *  {@code ReplaceWith} SVar lookup (if unresolved). */
+    private boolean tryParseProduceManaReplacement(Card host, ReplacementEffect re) {
+        String validActivator = re.getParam("ValidActivator");
+        if (validActivator != null && !validActivator.contains("You")) return false;
+        String validCard = re.getParamOrDefault("ValidCard", "Permanent");
+
+        int mult = 1;
+        // Path 1: resolved overriding ability.
+        SpellAbility action = null;
+        try { action = re.getOverridingAbility(); } catch (Throwable ignored) {}
+        if (action != null && action.getApi() == forge.game.ability.ApiType.ReplaceMana) {
+            try {
+                mult = Integer.parseInt(action.getParamOrDefault("ReplaceAmount", "1"));
+            } catch (NumberFormatException ignored) {}
+        }
+        // Path 2: unresolved — fall back to reading the SVar string.
+        if (mult <= 1) {
+            String replaceWith = re.getParam("ReplaceWith");
+            if (replaceWith != null) {
+                String svar = host.getSVar(replaceWith);
+                if (svar != null && svar.contains("ReplaceMana")) {
+                    int idx = svar.indexOf("ReplaceAmount$");
+                    if (idx >= 0) {
+                        String tail = svar.substring(idx + "ReplaceAmount$".length()).trim();
+                        // Extract leading integer token
+                        StringBuilder num = new StringBuilder();
+                        for (int i = 0; i < tail.length(); i++) {
+                            char ch = tail.charAt(i);
+                            if (Character.isDigit(ch)) num.append(ch);
+                            else if (num.length() > 0) break;
+                        }
+                        if (num.length() > 0) {
+                            try { mult = Integer.parseInt(num.toString()); }
+                            catch (NumberFormatException ignored) {}
+                        }
+                    }
+                }
+            }
+        }
+        if (mult <= 1) return false;
+
+        final String validCardF = validCard;
+        final int multF = mult;
+        java.util.function.Predicate<SpellAbility> matches = sa -> {
+            if (sa.getHostCard() == null) return false;
+            if (!hasCostTap(sa)) return false;
+            try {
+                return sa.getHostCard().isValid(validCardF, getPlayer(), sa.getHostCard(), sa);
+            } catch (Throwable ex) {
+                return false;
+            }
+        };
+        addManaModifier(new ManaAbilityEstimator.ManaModifier(
+                matches, new int[ManaBudget.NUM_BUCKETS], multF));
+        return true;
+    }
+
+    /** Parse a {@code Mode$ Panharmonicon} static into a TriggerDoubler,
+     *  but only if its {@code ValidMode$} filter allows triggers that
+     *  can fire during mana payment (i.e. not ETB-only). Panharmonicon
+     *  itself has {@code ValidMode$ ChangesZone,ChangesZoneAll} → filtered
+     *  out (ETB-only doesn't fire during payment). Harmonic Prodigy has
+     *  no ValidMode$ restriction → applies to all trigger modes. */
+    private void tryCollectTriggerDoubler(StaticAbility sa) {
+        String validMode = sa.getParam("ValidMode");
+        // ETB-only doublers don't interact with mana payment — skip them.
+        if (validMode != null) {
+            boolean allowsPayableTriggers =
+                    validMode.contains("TapsForMana")
+                    || validMode.contains("ManaAdded");
+            // If ValidMode is specified and doesn't include a
+            // payment-time trigger mode, skip. (Panharmonicon's
+            // ChangesZone/ChangesZoneAll falls into this branch.)
+            if (!allowsPayableTriggers) return;
+        }
+        // ValidCard filter: restrict the trigger host type the doubler
+        // applies to (e.g. Harmonic Prodigy → Shaman/Wizard).
+        final String validCard = sa.getParam("ValidCard");
+        final Card doublerHost = sa.getHostCard();
+        final StaticAbility stRef = sa;
+        java.util.function.BiPredicate<Trigger, Card> appliesTo = (t, triggerHost) -> {
+            if (triggerHost == null) return false;
+            if (validCard == null) return true;
+            try {
+                return triggerHost.isValid(validCard, doublerHost.getController(), doublerHost, stRef);
+            } catch (Throwable ex) {
+                return false;
+            }
+        };
+        addTriggerDoubler(new TriggerDoubler(appliesTo));
+    }
+
+    /** True if the SA's cost includes {@code CostTap}. */
+    private static boolean hasCostTap(SpellAbility sa) {
+        Cost cost = sa.getPayCosts();
+        if (cost == null) return false;
+        for (CostPart part : cost.getCostParts()) {
+            if (part instanceof forge.game.cost.CostTap) return true;
+        }
+        return false;
     }
 
     private void foldFloatingMana(Player p) {
