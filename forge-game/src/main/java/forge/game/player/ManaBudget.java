@@ -51,6 +51,15 @@ public final class ManaBudget {
     int totalMana;
     boolean totalUnbounded;
 
+    /** Upper bound on snow mana available this priority window. Snow sources
+     *  (lands with the Snow supertype, Coldsteel Heart, etc.) also contribute
+     *  to their regular color buckets — this counter is a parallel cap used
+     *  only when paying {S} shards. A non-snow source cannot pay {S}; our
+     *  previous model treated {S} as generic, which over-counted affordability
+     *  for snow-requiring spells like Rimefeather Owl's ability. */
+    int snowMana;
+    boolean snowUnbounded;
+
     /** Restricted-spend contributions. Each entry's mana is only added to
      *  the working budget for an SA that its {@code RestrictValid$} filter
      *  permits. The filter check uses the existing
@@ -163,7 +172,32 @@ public final class ManaBudget {
                 }
             }
         }
+        // Offering / Emerge: cast a spell by sacrificing a creature, with
+        // the emerge/offering cost reduced by the sacrificed creature's
+        // mana value. Applied only to the alt-cost variant SA (the
+        // normal-cast variant stays at its full printed cost).
+        //
+        // sa.isEmerge() / sa.isOffering() return true only when this SA
+        // represents the alt-cost path (set during getAllPossibleAbilities'
+        // alt-cost enumeration).
+        //
+        // Optimal discount = highest-CMC qualifying creature the player
+        // controls. We don't filter by type (Offering requires same type
+        // as the spell; Emerge may have a type filter) — using any
+        // creature is FP-safe (over-discount → over-report affordability).
+        int offeringEmergeDiscount = 0;
+        if (sa.isSpell() && (sa.isEmerge() || sa.isOffering())) {
+            int bestSacCmc = 0;
+            for (forge.game.card.Card c : scan.getPlayer().getCreaturesInPlay()) {
+                int cmc = c.getCMC();
+                if (cmc > bestSacCmc) bestSacCmc = cmc;
+            }
+            offeringEmergeDiscount = bestSacCmc;
+        }
         ManaCostBeingPaid working = new ManaCostBeingPaid(baseCost);
+        if (offeringEmergeDiscount > 0) {
+            working.decreaseGenericMana(offeringEmergeDiscount);
+        }
         boolean needsRestore = sa.getActivatingPlayer() == null;
         if (needsRestore) sa.setActivatingPlayer(scan.getPlayer());
         try {
@@ -192,6 +226,8 @@ public final class ManaBudget {
         }
         int workingTotal = totalMana;
         boolean workingTotalUnbounded = totalUnbounded;
+        int workingSnow = snowMana;
+        boolean workingSnowUnbounded = snowUnbounded;
 
         // Conflict-subtract: if this SA is a non-mana ability whose cost
         // shares a card-local resource (tap / sac-self / exile-self) with
@@ -300,7 +336,7 @@ public final class ManaBudget {
             return false;
         }
 
-        // Pass 2: strict colorless {C} shards. Colorless mana only — does not
+        // Pass 2a: strict colorless {C} shards. Colorless mana only — does not
         // accept colored or rainbow.
         for (ManaCostShard shard : shards) {
             if (shard == ManaCostShard.X || shard == ManaCostShard.COLORED_X) continue;
@@ -315,12 +351,31 @@ public final class ManaBudget {
             return false;
         }
 
-        // Pass 3: generic / snow shards. Fully fungible — any bucket,
-        // Delve/Improvise reduction, then Convoke pool leftover.
+        // Pass 2b: snow {S} shards. Only snow-typed mana sources can pay
+        // these. The parallel snowMana counter tracks the upper bound;
+        // each {S} shard consumes 1 from it. ManaConvert (Mycosynth
+        // Lattice) lifts the restriction.
         for (ManaCostShard shard : shards) {
             if (shard == ManaCostShard.X || shard == ManaCostShard.COLORED_X) continue;
             if (shard.isPhyrexian()) continue;
-            if (!(shard.isGeneric() || shard.isSnow())) continue;
+            if (!shard.isSnow()) continue;
+            if (allColorsFungible) {
+                if (!deductAny(work, workU)) return false;
+                continue;
+            }
+            if (workingSnowUnbounded) continue;
+            if (workingSnow > 0) { workingSnow--; continue; }
+            return false;
+        }
+
+        // Pass 3: generic shards. Fully fungible — any bucket,
+        // Delve/Improvise reduction, then Convoke pool leftover.
+        // (Snow shards were handled in pass 2b.)
+        for (ManaCostShard shard : shards) {
+            if (shard == ManaCostShard.X || shard == ManaCostShard.COLORED_X) continue;
+            if (shard.isPhyrexian()) continue;
+            if (shard.isSnow()) continue;
+            if (!shard.isGeneric()) continue;
             // Note: COLORLESS shards were handled in Pass 2 and skipped here.
             if (genericReduction > 0) { genericReduction--; continue; }
             if (deductAny(work, workU)) continue;

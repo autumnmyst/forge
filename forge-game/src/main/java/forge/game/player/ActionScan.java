@@ -655,6 +655,7 @@ public final class ActionScan {
         if (tapSacBranchUnbounded || exileUnbounded) {
             budget.totalUnbounded = true;
             unboundedCards.add(card);
+            if (card.isSnow()) budget.snowUnbounded = true;
             // Leave committedCardTotals alone — any prior finite contribution
             // stays folded in; flipping the unbounded flag subsumes it. No
             // delta subtraction because totalMana never had to "undo" a
@@ -676,6 +677,16 @@ public final class ActionScan {
                 budget.totalMana = 0;
             } else {
                 budget.totalMana = (int) sum;
+            }
+            // Snow tracking: if this card is a snow-typed source, mirror
+            // the same delta onto the parallel snowMana counter. Only
+            // {S} cost shards consume from this, so the budget doesn't
+            // double-count.
+            if (card.isSnow()) {
+                long snowSum = (long) budget.snowMana + (long) delta;
+                budget.snowMana = snowSum >= Integer.MAX_VALUE
+                        ? Integer.MAX_VALUE
+                        : (snowSum < 0 ? 0 : (int) snowSum);
             }
         }
         committedCardTotals.put(card, contribution);

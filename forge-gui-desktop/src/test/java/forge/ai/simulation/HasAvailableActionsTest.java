@@ -3621,6 +3621,71 @@ public class HasAvailableActionsTest extends SimulationTest {
                 affordableCardNames(p).contains("Return the Favor"));
     }
 
+    // =================================================================
+    // Snow mana tracking
+    // =================================================================
+
+    @Test
+    public void testSnowShardRejectsNonSnowSources() {
+        // Rimefeather Owl has activated ability {1}{S}: put an ice
+        // counter on target permanent. {S} (snow) can only be paid by
+        // snow-typed mana sources. Two regular (non-snow) Islands have
+        // plenty of total mana but zero snow — the ability must NOT be
+        // affordable. Previously we treated {S} as generic.
+        Player p = newGame();
+        addCards("Island", 2, p);
+        addCard("Rimefeather Owl", p).setSickness(false);
+        AssertJUnit.assertFalse(
+                "Non-snow Islands can't pay the {S} shard",
+                canAffordNonManaAbilityOf(p, "Rimefeather Owl"));
+    }
+
+    @Test
+    public void testSnowShardAcceptsSnowSources() {
+        // Same setup with Snow-Covered Islands — snow mana satisfies the
+        // {S} shard and provides colored U for anything else.
+        Player p = newGame();
+        addCards("Snow-Covered Island", 2, p);
+        addCard("Rimefeather Owl", p).setSickness(false);
+        AssertJUnit.assertTrue(
+                "Snow-Covered Islands pay both {S} and generic",
+                canAffordNonManaAbilityOf(p, "Rimefeather Owl"));
+    }
+
+    // =================================================================
+    // Offering / Emerge — sacrifice-based cost reduction
+    // =================================================================
+
+    @Test
+    public void testEmergeWithBigCreatureReducesCost() {
+        // Elder Deep-Fiend: base {8}, Emerge {5}{U}{U}. Sacrifice a
+        // creature whose CMC is N to reduce the emerge cost by N.
+        //
+        // Board: 3 Islands + Craw Wurm ({4}{G}{G} = 6 cmc). Hand: Elder
+        // Deep-Fiend. Emerge cost: 7 − 6 = 1 (just a single generic).
+        // 3 Islands provide 3 mana → affordable via Emerge path.
+        Player p = newGame();
+        addCards("Island", 3, p);
+        addCard("Craw Wurm", p).setSickness(false);
+        addCardToZone("Elder Deep-Fiend", p, ZoneType.Hand);
+        AssertJUnit.assertTrue(
+                "Elder Deep-Fiend should be affordable via Emerge sacrificing Craw Wurm",
+                affordableCardNames(p).contains("Elder Deep-Fiend"));
+    }
+
+    @Test
+    public void testEmergeWithoutCreatureNotAffordableOnTightMana() {
+        // Same cost, same spell in hand, but no creature to sacrifice.
+        // Only 3 Islands on board: Emerge requires 7 cmc (no discount),
+        // normal cast requires 8 cmc. Either way not affordable.
+        Player p = newGame();
+        addCards("Island", 3, p);
+        addCardToZone("Elder Deep-Fiend", p, ZoneType.Hand);
+        AssertJUnit.assertFalse(
+                "Elder Deep-Fiend can't be cast cheaply without a sacrificable creature",
+                affordableCardNames(p).contains("Elder Deep-Fiend"));
+    }
+
     // --- Sanity canary ---
 
     @Test
