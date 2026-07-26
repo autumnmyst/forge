@@ -56,6 +56,14 @@ public final class MatchAnimator {
     private static final int AOE_TARGET_THRESHOLD = 3;
     /** How far an attacker travels toward what it hits, as a fraction of the gap. */
     private static final float LUNGE_REACH = 0.55f;
+    private static final long LUNGE_MS = 420L;
+    private static final long IMPACT_MS = 560L;
+    /**
+     * When the collision sparks fire, as a fraction of {@link #IMPACT_MS}. Matched to
+     * the point the lunge reaches full extension, so the sparks appear on contact
+     * rather than as the attacker sets off.
+     */
+    private static final float IMPACT_TRIGGER = (LUNGE_MS * 0.35f) / IMPACT_MS;
 
     private final CMatchUI matchUI;
     private final AnimationLayer layer = new AnimationLayer();
@@ -350,11 +358,38 @@ public final class MatchAnimator {
             groups = new ArrayList<>(pendingDamage.values());
             pendingDamage.clear();
         }
+        // A blocker's damage is the other half of a collision the attacker's strike
+        // already shows. Rather than replaying it as its own exchange - a second beat,
+        // with particles crawling back across a gap the blocker never crossed - it is
+        // folded into the attacker's step as a simultaneous recoil.
+        final Map<Integer, Set<Integer>> counterHits = new HashMap<>();
+        final Set<DamageGroup> folded = new HashSet<>();
         for (final DamageGroup g : groups) {
+            if (g.source == null || g.source.isAttacking() || !g.source.isBlocking()
+                    || g.cardTargets.isEmpty() || !g.playerTargets.isEmpty()) {
+                continue;
+            }
+            boolean allAttackers = true;
+            for (final CardView t : g.cardTargets) {
+                allAttackers &= t.isAttacking();
+            }
+            if (!allAttackers) {
+                continue;
+            }
+            for (final CardView t : g.cardTargets) {
+                counterHits.computeIfAbsent(t.getId(), k -> new HashSet<>()).add(g.source.getId());
+            }
+            folded.add(g);
+        }
+
+        for (final DamageGroup g : groups) {
+            if (folded.contains(g)) {
+                continue;
+            }
             if (g.targetCount() >= AOE_TARGET_THRESHOLD) {
                 enqueueAreaEffect(g);
             } else {
-                enqueueDirectHits(g);
+                enqueueDirectHits(g, counterHits);
             }
         }
     }
@@ -374,7 +409,7 @@ public final class MatchAnimator {
      * {@link #orderTargets} puts the player last, so the attacker cuts through the
      * blockers and follows through to the player.
      */
-    private void enqueueDirectHits(final DamageGroup g) {
+    private void enqueueDirectHits(final DamageGroup g, final Map<Integer, Set<Integer>> counterHits) {
         final CardPanel sourcePanel = findPanel(g.source);
         final Point from = centreOf(g.source);
         final List<Color> palette = CardColors.of(g.source, canShow(g.source));
@@ -403,17 +438,27 @@ public final class MatchAnimator {
             final AnimationStep step = striking
                     ? new AnimationStep("strike:" + g.source.getName())
                     : shared;
-            if (from != null) {
-                step.add(new BeamAnim(from, to, palette, g.total, striking ? 320 : 460));
+            if (striking) {
+                // The card itself crosses the gap, so sparks only at the point of
+                // contact - a beam would be drawing the same journey a second time.
+                step.add(new ImpactAnim(to, palette, g.total, IMPACT_MS, IMPACT_TRIGGER));
+            } else if (from != null) {
+                // Nothing moves, so the effect has to travel on its own.
+                step.add(new BeamAnim(from, to, palette, g.total, 460));
             }
             if (target instanceof CardView cv) {
                 final CardPanel tp = findPanel(cv);
                 if (tp != null && from != null) {
                     step.add(PanelAnim.flinch(tp, toPanelSpace(tp, from), 260));
                 }
+                // If that blocker hit back, it recoils together with the attacker rather
+                // than in a beat of its own.
+                if (striking && counterHits.getOrDefault(g.source.getId(), Set.of()).contains(cv.getId())) {
+                    step.add(PanelAnim.flinch(sourcePanel, toPanelSpace(sourcePanel, to), 260));
+                }
             }
             if (striking) {
-                step.add(PanelAnim.lunge(sourcePanel, toPanelSpace(sourcePanel, to), LUNGE_REACH, 420));
+                step.add(PanelAnim.lunge(sourcePanel, toPanelSpace(sourcePanel, to), LUNGE_REACH, LUNGE_MS));
                 queue.enqueue(step);
             }
         }
