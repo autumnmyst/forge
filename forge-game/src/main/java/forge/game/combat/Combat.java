@@ -424,6 +424,16 @@ public class Combat {
         // If requesting the ordered blocking list pass true, directly.
         return getBlockers(getBandOfAttacker(card));
     }
+
+    /**
+     * Blockers in the order damage will actually be assigned to them, or null before
+     * that order has been chosen. Unlike {@link #getBlockers(Card)} this reflects the
+     * attacking player's damage assignment order, which is the sequence the attacker
+     * works through when combat damage is dealt.
+     */
+    public final CardCollection getOrderedBlockers(final Card attacker) {
+        return blockersOrderedForDamageAssignment.get().get(attacker);
+    }
     public final CardCollection getBlockers(final AttackingBand band) {
         Collection<Card> blockers = blockedBands.get().get(band);
         return blockers == null ? new CardCollection() : new CardCollection(blockers);

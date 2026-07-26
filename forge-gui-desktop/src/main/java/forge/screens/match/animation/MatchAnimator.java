@@ -15,7 +15,9 @@ import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
 
+import forge.game.GameEntityView;
 import forge.game.card.CardView;
+import forge.game.combat.CombatView;
 import forge.game.event.GameEvent;
 import forge.game.event.GameEventCardChangeZone;
 import forge.game.event.GameEventCardDamaged;
@@ -33,6 +35,7 @@ import forge.model.FModel;
 import forge.screens.match.CMatchUI;
 import forge.screens.match.views.VField;
 import forge.screens.match.views.VHand;
+import forge.util.collect.FCollectionView;
 import forge.view.arcane.CardPanel;
 
 /**
@@ -357,61 +360,98 @@ public final class MatchAnimator {
     }
 
     /**
-     * One attacker hitting one or two things: a beam per target, plus a lunge if the
-     * source is a creature in combat.
+     * One source hitting a small number of things.
      * <p>
-     * This is where double strike and trample come out for free. Double strike deals
-     * damage in two separate steps, so two groups arrive and the attacker lunges twice.
-     * A trampler assigns to its blocker and to the defending player within one step, so
-     * a single group carries both targets and the attacker strikes at each.
+     * An attacker is shown working through what it hit one at a time, in damage
+     * assignment order, because that is the order the rules actually assign in: it must
+     * finish with the first blocker before any damage reaches the second. A single
+     * lunge at one of several blockers would misrepresent that, and lunging at them all
+     * at once is not something a card can do.
+     * <p>
+     * Double strike and trample need no special handling. Double strike deals damage in
+     * two separate steps, so two groups arrive and the whole sequence plays twice. A
+     * trampler assigns to its blockers and to the defending player within one step, and
+     * {@link #orderTargets} puts the player last, so the attacker cuts through the
+     * blockers and follows through to the player.
      */
     private void enqueueDirectHits(final DamageGroup g) {
         final CardPanel sourcePanel = findPanel(g.source);
+        final Point from = centreOf(g.source);
         final List<Color> palette = CardColors.of(g.source, canShow(g.source));
-        final AnimationStep step = new AnimationStep("damage:" + g.source.getName());
-
-        final List<Point> targets = new ArrayList<>(g.targetCount());
-        for (final CardView target : g.cardTargets) {
-            final Point to = centreOf(target);
-            if (to != null) {
-                targets.add(to);
-                final CardPanel tp = findPanel(target);
-                if (tp != null && sourcePanel != null) {
-                    step.add(PanelAnim.flinch(tp, toPanelSpace(tp, centreOf(g.source)), 260));
-                }
-            }
-        }
-        for (final PlayerView target : g.playerTargets) {
-            final Point to = avatarCentre(target);
-            if (to != null) {
-                targets.add(to);
-            }
-        }
+        final List<GameEntityView> targets = orderTargets(g);
         if (targets.isEmpty()) {
             return;
         }
 
-        final Point from = centreOf(g.source);
-        if (from != null) {
-            for (final Point to : targets) {
-                step.add(new BeamAnim(from, to, palette, g.total, 460));
+        // Only the attacker moves, never the blocker, even though both deal damage in
+        // the same step. Two creatures striking each other would advance at once and
+        // overlap in the middle, and several blockers would all converge on one
+        // attacker. The blocker's half of the exchange is already legible: it flinches
+        // from the attacker's damage, and the attacker flinches from the blocker's own
+        // damage group. Lunging is for the aggressor. A burn spell must not lunge
+        // either, hence the combat check rather than just testing for a creature.
+        final boolean striking = sourcePanel != null && g.source.isAttacking();
+
+        // A striking attacker gets one step per target so they play in sequence;
+        // everything else resolves as a single step with its hits shown together.
+        AnimationStep shared = striking ? null : new AnimationStep("damage:" + g.source.getName());
+        for (final GameEntityView target : targets) {
+            final Point to = target instanceof CardView cv ? centreOf(cv) : avatarCentre((PlayerView) target);
+            if (to == null) {
+                continue;
+            }
+            final AnimationStep step = striking
+                    ? new AnimationStep("strike:" + g.source.getName())
+                    : shared;
+            if (from != null) {
+                step.add(new BeamAnim(from, to, palette, g.total, striking ? 320 : 460));
+            }
+            if (target instanceof CardView cv) {
+                final CardPanel tp = findPanel(cv);
+                if (tp != null && from != null) {
+                    step.add(PanelAnim.flinch(tp, toPanelSpace(tp, from), 260));
+                }
+            }
+            if (striking) {
+                step.add(PanelAnim.lunge(sourcePanel, toPanelSpace(sourcePanel, to), LUNGE_REACH, 420));
+                queue.enqueue(step);
             }
         }
-        // Only the attacker lunges, never the blocker, even though both deal damage in
-        // the same step. Two creatures striking each other would move toward each other
-        // at once and overlap in the middle, and several blockers would all converge on
-        // one attacker. The blocker's half of the exchange is already legible: it takes
-        // a flinch from the attacker's damage above, and the attacker takes one from the
-        // blocker's own damage group. Lunging is for the aggressor.
-        //
-        // A burn spell must not lunge either, hence the combat check rather than just
-        // testing for a creature.
-        if (sourcePanel != null && g.source.isAttacking()) {
-            final Point toward = toPanelSpace(sourcePanel, targets.get(0));
-            step.add(PanelAnim.lunge(sourcePanel, toward, LUNGE_REACH, 420));
+        if (shared != null && !shared.isEmpty()) {
+            queue.enqueue(shared);
         }
-        queue.enqueue(step);
         clock.start();
+    }
+
+    /**
+     * The things a source damaged, in the order it reached them: blockers in damage
+     * assignment order first, then anything else, then players.
+     * <p>
+     * The damage events themselves cannot supply this - they are read out of a
+     * {@code HashBasedTable}, so they arrive in hash order. The real sequence comes from
+     * the combat view, which reports a blocked attacker's blockers in the attacking
+     * player's chosen damage assignment order.
+     */
+    private List<GameEntityView> orderTargets(final DamageGroup g) {
+        final List<GameEntityView> ordered = new ArrayList<>(g.targetCount());
+        final List<CardView> remaining = new ArrayList<>(g.cardTargets);
+
+        final CombatView combat = matchUI.getGameView() == null ? null : matchUI.getGameView().getCombat();
+        if (combat != null && g.source.isAttacking()) {
+            final FCollectionView<CardView> blockers = combat.getBlockers(g.source);
+            if (blockers != null) {
+                for (final CardView blocker : blockers) {
+                    if (remaining.remove(blocker)) {
+                        ordered.add(blocker);
+                    }
+                }
+            }
+        }
+        // Anything damaged that is not a blocker of this attacker keeps its arrival order.
+        ordered.addAll(remaining);
+        // Players last: trample overflow only reaches them once the blockers are through.
+        ordered.addAll(g.playerTargets);
+        return ordered;
     }
 
     /** An effect that hit enough things to be worth showing as a sweep over each board. */
