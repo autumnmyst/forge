@@ -397,10 +397,16 @@ public final class MatchAnimator {
                 step.add(new BeamAnim(from, to, palette, g.total, 460));
             }
         }
-        // Only creatures actually in combat lunge; a burn spell should not shove its own
-        // card across the battlefield. Blockers strike too, so they lunge back at what
-        // they are fighting rather than only taking the hit.
-        if (sourcePanel != null && (g.source.isAttacking() || g.source.isBlocking())) {
+        // Only the attacker lunges, never the blocker, even though both deal damage in
+        // the same step. Two creatures striking each other would move toward each other
+        // at once and overlap in the middle, and several blockers would all converge on
+        // one attacker. The blocker's half of the exchange is already legible: it takes
+        // a flinch from the attacker's damage above, and the attacker takes one from the
+        // blocker's own damage group. Lunging is for the aggressor.
+        //
+        // A burn spell must not lunge either, hence the combat check rather than just
+        // testing for a creature.
+        if (sourcePanel != null && g.source.isAttacking()) {
             final Point toward = toPanelSpace(sourcePanel, targets.get(0));
             step.add(PanelAnim.lunge(sourcePanel, toward, LUNGE_REACH, 420));
         }
