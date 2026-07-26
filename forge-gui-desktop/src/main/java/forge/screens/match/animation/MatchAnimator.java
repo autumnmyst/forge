@@ -20,7 +20,12 @@ import forge.game.event.GameEvent;
 import forge.game.event.GameEventCardChangeZone;
 import forge.game.event.GameEventCardDamaged;
 import forge.game.event.GameEventPlayerDamaged;
+import forge.game.event.GameEventSpellAbilityCast;
+import forge.game.event.GameEventSpellRemovedFromStack;
+import forge.game.event.GameEventSpellResolved;
 import forge.game.player.PlayerView;
+import forge.game.spellability.SpellAbilityView;
+import forge.game.spellability.StackItemView;
 import forge.game.zone.ZoneType;
 import forge.gui.FThreads;
 import forge.localinstance.properties.ForgePreferences.FPref;
@@ -107,6 +112,9 @@ public final class MatchAnimator {
         departing.clear();
         arriving.clear();
         pendingDamage.clear();
+        synchronized (pendingCasts) {
+            pendingCasts.clear();
+        }
     }
 
     // ------------------------------------------------------------------ event intake
@@ -127,6 +135,12 @@ public final class MatchAnimator {
                 recordDamage(e.source(), null, e.target(), e.amount());
             } else if (ev instanceof GameEventCardChangeZone e) {
                 recordZoneChange(e);
+            } else if (ev instanceof GameEventSpellAbilityCast e) {
+                recordCast(e);
+            } else if (ev instanceof GameEventSpellResolved e) {
+                resolveCast(e);
+            } else if (ev instanceof GameEventSpellRemovedFromStack e) {
+                forgetCast(e.sa());
             }
             // Note there is no token-created case: GameEventTokenCreated carries no
             // payload at all, so tokens are recognised by CardView.isToken() when their
@@ -149,6 +163,134 @@ public final class MatchAnimator {
             } else if (to == ZoneType.Battlefield) {
                 arriving.add(card.getId());
             }
+        }
+    }
+
+    // ------------------------------------------------------------------ spell resolution
+
+    /** What a spell was aimed at, remembered from cast time so it can be shown resolving. */
+    private static final class CastRecord {
+        private final CardView source;
+        private final List<CardView> cardTargets = new ArrayList<>(2);
+        private final List<PlayerView> playerTargets = new ArrayList<>(1);
+
+        CastRecord(final CardView source) {
+            this.source = source;
+        }
+
+        int targetCount() {
+            return cardTargets.size() + playerTargets.size();
+        }
+    }
+
+    /**
+     * Targets captured at cast time, keyed by the ability's view.
+     * <p>
+     * They have to be captured then rather than read at resolution, because
+     * {@link GameEventSpellResolved} carries only a {@link SpellAbilityView}, which
+     * exposes its host card but not what it was pointed at. The stack item that does
+     * know is gone by then.
+     */
+    private final Map<SpellAbilityView, CastRecord> pendingCasts = new LinkedHashMap<>();
+
+    private void recordCast(final GameEventSpellAbilityCast e) {
+        final StackItemView si = e.si();
+        if (si == null || e.sa() == null) {
+            return;
+        }
+        final CastRecord rec = new CastRecord(si.getSourceCard());
+        // Walk the sub-instances too, the way the targeting arrows do, so the targets of
+        // a subability are drawn as well as the top-level ones.
+        for (StackItemView cur = si; cur != null; cur = cur.getSubInstance()) {
+            if (cur.getTargetCards() != null) {
+                for (final CardView c : cur.getTargetCards()) {
+                    rec.cardTargets.add(c);
+                }
+            }
+            if (cur.getTargetPlayers() != null) {
+                for (final PlayerView p : cur.getTargetPlayers()) {
+                    rec.playerTargets.add(p);
+                }
+            }
+        }
+        if (rec.targetCount() == 0) {
+            return; // nothing to draw a line to
+        }
+        synchronized (pendingCasts) {
+            pendingCasts.put(e.sa(), rec);
+            // Anything countered or otherwise removed without a resolution event would
+            // sit here forever; cap the map rather than trust every path to clean up.
+            while (pendingCasts.size() > MAX_PENDING_CASTS) {
+                final SpellAbilityView oldest = pendingCasts.keySet().iterator().next();
+                pendingCasts.remove(oldest);
+            }
+        }
+    }
+
+    private static final int MAX_PENDING_CASTS = 64;
+
+    private void forgetCast(final SpellAbilityView sa) {
+        if (sa == null) {
+            return;
+        }
+        synchronized (pendingCasts) {
+            pendingCasts.remove(sa);
+        }
+    }
+
+    /** Draw the spell reaching its targets, at the moment it actually resolves. */
+    private void resolveCast(final GameEventSpellResolved e) {
+        final CastRecord rec;
+        synchronized (pendingCasts) {
+            rec = pendingCasts.remove(e.spell());
+        }
+        if (rec == null || e.hasFizzled()) {
+            // A fizzled spell never reached anything, so showing it connect would lie.
+            return;
+        }
+        FThreads.invokeInEdtLater(() -> enqueueResolution(rec));
+    }
+
+    private void enqueueResolution(final CastRecord rec) {
+        final Point from = centreOf(rec.source);
+        if (from == null) {
+            return;
+        }
+        final List<Color> palette = CardColors.of(rec.source, canShow(rec.source));
+        final AnimationStep step = new AnimationStep("resolve:" + rec.source.getName());
+
+        if (rec.targetCount() >= AOE_TARGET_THRESHOLD) {
+            // Enough targets that individual beams would be noise; sweep the boards.
+            final Set<PlayerView> affected = new HashSet<>();
+            for (final CardView c : rec.cardTargets) {
+                if (c.getController() != null) {
+                    affected.add(c.getController());
+                }
+            }
+            affected.addAll(rec.playerTargets);
+            for (final PlayerView p : affected) {
+                final Rectangle area = battlefieldBounds(p);
+                if (area != null) {
+                    step.add(new BurstAnim(area, palette, 140, 620));
+                }
+            }
+        } else {
+            for (final CardView c : rec.cardTargets) {
+                final Point to = centreOf(c);
+                if (to != null) {
+                    step.add(new BeamAnim(from, to, palette, 1f, 480));
+                }
+            }
+            for (final PlayerView p : rec.playerTargets) {
+                final Point to = avatarCentre(p);
+                if (to != null) {
+                    step.add(new BeamAnim(from, to, palette, 1f, 480));
+                }
+            }
+        }
+        if (!step.isEmpty()) {
+            queue.enqueue(step);
+            clock.start();
         }
     }
 
@@ -255,9 +397,10 @@ public final class MatchAnimator {
                 step.add(new BeamAnim(from, to, palette, g.total, 460));
             }
         }
-        // Only creatures actually in combat lunge; a burn spell should not shove its
-        // own card across the battlefield.
-        if (sourcePanel != null && g.source.isAttacking()) {
+        // Only creatures actually in combat lunge; a burn spell should not shove its own
+        // card across the battlefield. Blockers strike too, so they lunge back at what
+        // they are fighting rather than only taking the hit.
+        if (sourcePanel != null && (g.source.isAttacking() || g.source.isBlocking())) {
             final Point toward = toPanelSpace(sourcePanel, targets.get(0));
             step.add(PanelAnim.lunge(sourcePanel, toward, LUNGE_REACH, 420));
         }
