@@ -300,6 +300,11 @@ public abstract class CardPanelContainer extends SkinnedPanel {
             setMouseDragPanel(null);
         }
         hoveredPanel = null;
+        // Last moment the panel is still valid: an animation for a card leaving play has
+        // to copy its pixels now, because dispose() below makes it unpaintable.
+        if (matchUI != null) {
+            matchUI.getAnimator().onPanelRemoved(fromPanel);
+        }
         fromPanel.dispose();
         getCardPanels().remove(fromPanel);
         remove(fromPanel);
@@ -339,6 +344,11 @@ public abstract class CardPanelContainer extends SkinnedPanel {
     public final void clear(final boolean repaint) {
         FThreads.assertExecutedByEdt(true);
         for (final CardPanel p : getCardPanels()) {
+            // Same hook as removeCardPanel: this path is taken when every card in the
+            // zone leaves at once, which is exactly what a board wipe looks like.
+            if (matchUI != null) {
+                matchUI.getAnimator().onPanelRemoved(p);
+            }
             p.dispose();
         }
         getCardPanels().clear();

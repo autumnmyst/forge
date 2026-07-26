@@ -64,6 +64,8 @@ public enum FView {
 	public static final Integer NAVIGATION_BAR_REVEAL_LAYER = NAVIGATION_BAR_LAYER - 1;
 	public static final Integer OVERLAY_LAYER = NAVIGATION_BAR_REVEAL_LAYER - 1;
 	public static final Integer TARGETING_LAYER = OVERLAY_LAYER - 1;
+	/** Flying cards and particles: above every card panel, below the targeting arrows. */
+	public static final Integer ANIMATION_LAYER = TARGETING_LAYER - 1;
 
 	private final List<DragCell> allCells = new ArrayList<>();
 	private SplashFrame frmSplash;
