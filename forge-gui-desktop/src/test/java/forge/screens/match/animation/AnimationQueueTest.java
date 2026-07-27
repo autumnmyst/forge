@@ -144,6 +144,45 @@ public class AnimationQueueTest {
         assertEquals(log.size(), 6);
     }
 
+    /**
+     * Commit-only steps - a sound, a card refresh, a zone rebuild - must not register as
+     * backlog. They cost no time, and counting them made a single card being played look
+     * like a display far behind, which either accelerated playback or discarded the one
+     * animation that mattered.
+     */
+    @Test
+    public void commitOnlyStepsDoNotCountAsBacklog() {
+        final List<String> log = new ArrayList<>();
+        final AnimationQueue q = new AnimationQueue();
+        // Far more bookkeeping than the trim threshold, around one real animation.
+        for (int i = 0; i < 40; i++) {
+            q.enqueue(new AnimationStep("commit" + i).after(() -> log.add("commit")));
+        }
+        q.enqueue(step("real", log, 400));
+
+        q.tick(16);
+        assertEquals(log.stream().filter("commit"::equals).count(), 40,
+                "the bookkeeping should drain in one tick rather than be paced out");
+
+        // The drain stops short of starting the animation so it gets a whole tick of its
+        // own rather than whatever was left over.
+        q.tick(16);
+        assertTrue(log.contains("real:before"), "the real animation should have started");
+        assertFalse(log.contains("real:after"),
+                "and should still be playing, not trimmed away as backlog");
+    }
+
+    @Test
+    public void aRealBacklogStillGetsTrimmed() {
+        final List<String> log = new ArrayList<>();
+        final AnimationQueue q = new AnimationQueue();
+        for (int i = 0; i < 60; i++) {
+            q.enqueue(step("s" + i, log, 10_000));
+        }
+        q.tick(16);
+        assertTrue(q.getDepth() <= 21, "genuine motion backlog is still bounded, was " + q.getDepth());
+    }
+
     @Test
     public void pausedQueueHoldsWithoutDropping() {
         final List<String> log = new ArrayList<>();

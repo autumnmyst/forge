@@ -134,7 +134,7 @@ public final class AnimationQueue {
     /** Commit the oldest steps without showing them once the backlog is hopeless. */
     private void trimBacklog() {
         int guard = 0;
-        while (pending.size() > MAX_DEPTH && guard++ < 10000) {
+        while (animatedDepth() > MAX_DEPTH && guard++ < 10000) {
             if (current == null) {
                 startNext();
             }
@@ -142,9 +142,30 @@ public final class AnimationQueue {
         }
     }
 
+    /**
+     * How far behind the display actually is, counted in steps that have something to
+     * show.
+     * <p>
+     * Most of the queue is not motion at all: a sound to play, a set of cards to refresh,
+     * a zone to rebuild. Those are ordering markers that cost no time - the drain loop
+     * takes them several at a tick - so counting them as backlog made a single land
+     * being played look like a display ten steps behind. Playback would then accelerate
+     * to catch up with a backlog that did not exist, or discard the one animation in the
+     * queue that mattered.
+     */
+    private int animatedDepth() {
+        int n = 0;
+        for (final AnimationStep s : pending) {
+            if (!s.isEmpty()) {
+                n++;
+            }
+        }
+        return n;
+    }
+
     /** Playback rate from the backlog alone; the user setting is applied by the clock. */
     private float speedScale() {
-        final int depth = pending.size();
+        final int depth = animatedDepth();
         if (depth <= CATCHUP_DEPTH) {
             return 1f;
         }

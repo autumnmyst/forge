@@ -380,6 +380,28 @@ public final class MatchAnimator {
         clock.start();
     }
 
+    /**
+     * Whether resolving this card puts it onto the battlefield.
+     * <p>
+     * A creature, artifact, enchantment or planeswalker spell resolves into play, and
+     * its arrival animation already draws the stack-to-battlefield beam. Sparking as
+     * well would be a second, redundant flourish on top of it - and the spark lands on
+     * the card itself, which by then is sitting on the battlefield, so it reads as the
+     * effect happening in the wrong place entirely.
+     * <p>
+     * Read off the card rather than inferred from what appears afterwards, so it needs
+     * no correlation between the resolve event and the zone change that follows it.
+     */
+    private static boolean becomesPermanent(final CardView card) {
+        try {
+            return card != null && card.getCurrentState() != null
+                    && card.getCurrentState().getType() != null
+                    && card.getCurrentState().getType().isPermanent();
+        } catch (final RuntimeException e) {
+            return false;
+        }
+    }
+
     private void enqueueResolution(final CastRecord rec) {
         // Everything a resolution does comes out of the stack, because that is where the
         // spell or ability is. Its trip out of its source was already shown when it was
@@ -409,12 +431,15 @@ public final class MatchAnimator {
                 step.add(new BeamAnim(from, to, palette, 1f, 480));
             }
         }
-        if (step.isEmpty()) {
-            // The catch-all: nothing targeted and nothing to point at, so the ability
-            // just did its work. Sparked at the source card if it is still on the board -
-            // a prowess trigger, say - and at the stack if it is not.
+        if (step.isEmpty() && !becomesPermanent(rec.source)) {
+            // The catch-all: nothing targeted, and nothing about to enter play either, so
+            // the ability simply did its work. Sparked at the source card if it is still
+            // on the board - a prowess trigger, say - and at the stack if it is not.
             final Point at = centreOf(rec.source);
             step.add(new ImpactAnim(at != null ? at : from, palette, 2f, 420, 0f));
+        }
+        if (step.isEmpty()) {
+            return; // a permanent spell; its arrival draws the beam to where it lands
         }
         queue.enqueue(step);
         clock.start();
