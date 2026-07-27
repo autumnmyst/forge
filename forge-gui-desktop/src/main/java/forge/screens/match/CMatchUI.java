@@ -678,6 +678,19 @@ public final class CMatchUI
 
     @Override
     public void updateCards(final Iterable<CardView> cards) {
+        // Copied before anything else: the event handler hands over its live set and
+        // clears it the moment this returns, so a deferred run would find it empty and
+        // the board would quietly stop refreshing cards altogether.
+        final List<CardView> snapshot = Lists.newArrayList(cards);
+        // Held behind the animations for the same reason zone updates are - a creature
+        // should not show the damage before the blow that dealt it has landed.
+        if (animator.defer("cards", () -> applyCardUpdates(snapshot))) {
+            return;
+        }
+        applyCardUpdates(snapshot);
+    }
+
+    private void applyCardUpdates(final Iterable<CardView> cards) {
         for (final CardView c : cards) {
             // Null can flow in from a remote-side event whose IdRef failed to resolve in the tracker.
             if (c == null) { continue; }

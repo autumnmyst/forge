@@ -256,6 +256,14 @@ public final class MatchAnimator {
         private final CardView source;
         private final List<CardView> cardTargets = new ArrayList<>(2);
         private final List<PlayerView> playerTargets = new ArrayList<>(1);
+        /**
+         * Where each targeted card was when the spell was cast.
+         * <p>
+         * Needed because a spell that destroys what it targets has already removed the
+         * card's panel by the time it resolves, so asking then gives nothing to draw to -
+         * removal spells drew no beam at all and fell through to the catch-all spark.
+         */
+        private final Map<Integer, Point> targetPoints = new HashMap<>();
 
         CastRecord(final CardView source) {
             this.source = source;
@@ -301,7 +309,16 @@ public final class MatchAnimator {
         // cannot tell, and it happens once, here, at cast time.
         final CardView host = si.getSourceCard();
         final PlayerView activator = si.getActivatingPlayer();
-        FThreads.invokeInEdtLater(() -> enqueueOntoStack(host, activator));
+        FThreads.invokeInEdtLater(() -> {
+            enqueueOntoStack(host, activator);
+            // Measure the targets now, while they are all still on the board.
+            for (final CardView c : rec.cardTargets) {
+                final Point at = centreOf(c);
+                if (at != null) {
+                    rec.targetPoints.put(c.getId(), at);
+                }
+            }
+        });
 
         // Recorded even with no targets: an untargeted ability still resolves, and gets
         // a pulse at its source rather than a line to anywhere.
@@ -376,7 +393,12 @@ public final class MatchAnimator {
         // specific creatures, and sweeping the board instead would claim it hit
         // everything. A sweep is for effects with no targets at all.
         for (final CardView c : rec.cardTargets) {
-            final Point to = centreOf(c);
+            // Live position first, so a target that moved is still followed; the position
+            // taken at cast time as a fallback, for one the spell has just destroyed.
+            Point to = centreOf(c);
+            if (to == null) {
+                to = rec.targetPoints.get(c.getId());
+            }
             if (to != null) {
                 step.add(new BeamAnim(from, to, palette, 1f, 480));
             }
@@ -900,10 +922,19 @@ public final class MatchAnimator {
     }
 
     public Point centreOf(final CardPanel panel) {
-        if (panel == null || !panel.isShowing() || !layer.isShowing()) {
+        if (panel == null || !layer.isShowing()) {
             return null;
         }
-        return SwingUtilities.convertPoint(panel.getParent(),
+        // Deliberately the parent's isShowing, not the panel's. A component reports
+        // itself as not showing until it has a peer, which it only gets when the
+        // hierarchy is validated - and a card panel is laid out and handed to us before
+        // that happens. Testing the panel meant every newly created card measured as
+        // off-screen, so nothing entering play ever got a beam drawn to it.
+        final java.awt.Container parent = panel.getParent();
+        if (parent == null || !parent.isShowing()) {
+            return null;
+        }
+        return SwingUtilities.convertPoint(parent,
                 panel.getX() + panel.getWidth() / 2, panel.getY() + panel.getHeight() / 2, layer);
     }
 
