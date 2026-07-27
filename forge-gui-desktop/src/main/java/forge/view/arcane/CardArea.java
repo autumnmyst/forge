@@ -27,6 +27,7 @@ import java.awt.event.MouseEvent;
 import java.util.List;
 
 import javax.swing.JLayeredPane;
+import javax.swing.JRootPane;
 import javax.swing.RootPaneContainer;
 import javax.swing.SwingUtilities;
 
@@ -164,6 +165,9 @@ public class CardArea extends CardPanelContainer implements CardPanelMouseListen
                 zOrder = maxZOrder;
             }
             for (final CardPanel panel : this.getCardPanels()) {
+                if (isStray(panel)) {
+                    continue;
+                }
                 if (panel != this.getMouseDragPanel()) {
                     panel.setCardBounds((int) Math.floor(x), y, cardWidth, cardHeight);
                 }
@@ -225,6 +229,9 @@ public class CardArea extends CardPanelContainer implements CardPanelMouseListen
             int y = CardArea.GUTTER_Y;
             int zOrder = 0, rowCount = 0;
             for (final CardPanel panel : this.getCardPanels()) {
+                if (isStray(panel)) {
+                    continue;
+                }
                 if (panel != this.getMouseDragPanel()) {
                     panel.setCardBounds((int) Math.floor(x), y, cardWidth, cardHeight);
                 }
@@ -311,13 +318,35 @@ public class CardArea extends CardPanelContainer implements CardPanelMouseListen
         this.revalidate();
     }
 
+    /**
+     * Whether this panel is listed here but no longer parented here.
+     * <p>
+     * A panel can be reparented out from under the list - onto the layered pane for a
+     * flight animation - or removed because its card left the zone mid-drag. Laying one
+     * out is at best meaningless and at worst fatal: {@code setComponentZOrder} throws
+     * when the component belongs to another window.
+     */
+    private boolean isStray(final CardPanel panel) {
+        return panel == null || panel.getParent() != this || panel.getCard() == null;
+    }
+
     @Override
     public final void mouseDragEnd(final CardPanel dragPanel, final MouseEvent evt) {
         super.setDragged(false);
 
+        // Listeners can play the dragged card out of this zone, which disposes its panel
+        // and unparents it. Everything below assumes the card is still here and snaps it
+        // back into a slot, so there is nothing left to animate once it has gone.
         super.mouseDragEnd(dragPanel, evt);
         this.doLayout();
-        final JLayeredPane layeredPane = SwingUtilities.getRootPane(CardPanel.getDragAnimationPanel()).getLayeredPane();
+        if (isStray(dragPanel) || CardPanel.getDragAnimationPanel() == null) {
+            return;
+        }
+        final JRootPane rootPane = SwingUtilities.getRootPane(CardPanel.getDragAnimationPanel());
+        if (rootPane == null) {
+            return;
+        }
+        final JLayeredPane layeredPane = rootPane.getLayeredPane();
         final int startX = CardPanel.getDragAnimationPanel().getCardX();
         final int startY = CardPanel.getDragAnimationPanel().getCardY();
         final int startWidth = CardPanel.getDragAnimationPanel().getCardWidth();
