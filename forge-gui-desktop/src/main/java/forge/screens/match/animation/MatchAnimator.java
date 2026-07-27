@@ -780,7 +780,7 @@ public final class MatchAnimator {
                 // Not a tracked arrival - a re-layout, or the board being rebuilt.
                 continue;
             }
-            enqueueArrival(panel, card, originFor(from, captured));
+            enqueueArrival(panel, card, originFor(from, captured, card));
         }
     }
 
@@ -809,9 +809,19 @@ public final class MatchAnimator {
      * @param from     the zone it came out of, or null if it was created rather than moved.
      * @param captured a position measured before the source panel was destroyed.
      */
-    private Point originFor(final ZoneType from, final Point captured) {
+    private Point originFor(final ZoneType from, final Point captured, final CardView card) {
         if (captured != null) {
-            return captured; // measured where it actually sat, e.g. a land in hand
+            return captured; // measured in the exact slot it left
+        }
+        if (from == ZoneType.Hand) {
+            // A land. Its own hand slot is usually not measurable in time - the
+            // battlefield is refreshed before the hand, so the card's panel still exists
+            // when this runs and is gone a moment later. The hand area as a whole reads
+            // the same to the eye and does not depend on that ordering.
+            final Point hand = handAreaCentre(card);
+            if (hand != null) {
+                return hand;
+            }
         }
         if (lastEffectOrigin != null) {
             // Whatever just resolved was a card on the board - a permanent activating an
@@ -820,6 +830,27 @@ public final class MatchAnimator {
         }
         // Nothing else to come from: it resolved off the stack.
         return stackAnchor();
+    }
+
+    /** Middle of a player's hand area, for something coming out of it. */
+    private Point handAreaCentre(final CardView card) {
+        if (card == null) {
+            return null;
+        }
+        final PlayerView owner = card.getOwner() != null ? card.getOwner() : card.getController();
+        if (owner == null) {
+            return null;
+        }
+        try {
+            final VHand hand = matchUI.getHandFor(owner);
+            final Rectangle bounds = hand == null ? null : boundsInLayer(hand.getHandArea());
+            if (bounds != null && bounds.width > 0) {
+                return new Point(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+            }
+        } catch (final RuntimeException e) {
+            // Hand not laid out, or not shown for this player.
+        }
+        return null;
     }
 
     // ------------------------------------------------------------------ geometry
