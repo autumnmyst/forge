@@ -122,6 +122,11 @@ public final class HeldCard extends Anim {
         return phase != Phase.MOVING;
     }
 
+    /** Where the card is right now, for effects that should originate from it. */
+    public Point getPosition() {
+        return new Point((int) Math.round(x), (int) Math.round(y));
+    }
+
     @Override
     protected void update(final float t) {
         final long dt = getDeltaMs();

@@ -79,6 +79,8 @@ public final class MatchAnimator {
     private final Map<Integer, ZoneType> departing = new HashMap<>();
     /** Cards that just arrived on a battlefield, to be faded in once their panel exists. */
     private final Set<Integer> arriving = new HashSet<>();
+    /** Where each arriving card came from, so it can be shown travelling out of it. */
+    private final Map<Integer, ZoneType> arrivedFrom = new HashMap<>();
 
     /** Damage grouped by source, flushed on the next EDT pass. See {@link #flushDamage()}. */
     private final Map<Integer, DamageGroup> pendingDamage = new LinkedHashMap<>();
@@ -124,6 +126,7 @@ public final class MatchAnimator {
         queue.skipAll();
         departing.clear();
         arriving.clear();
+        arrivedFrom.clear();
         pendingDamage.clear();
         synchronized (pendingCasts) {
             pendingCasts.clear();
@@ -192,6 +195,7 @@ public final class MatchAnimator {
                 departing.put(card.getId(), to);
             } else if (to == ZoneType.Battlefield) {
                 arriving.add(card.getId());
+                arrivedFrom.put(card.getId(), from);
             }
         }
     }
@@ -445,9 +449,14 @@ public final class MatchAnimator {
     }
 
     private void enqueueResolution(final CastRecord rec) {
-        final Point from = centreOf(rec.source);
+        // A resolving spell has no card panel anywhere - it is on the stack, which the
+        // desktop client renders as text rather than cards. Its beams therefore start
+        // from wherever the card is being carried, falling back to the stack itself.
+        // Requiring a panel here is why targeted spells drew nothing at all.
+        Point from = centreOf(rec.source);
         if (from == null) {
-            return;
+            final HeldCard heldCard = rec.source == null ? null : takeHeld(rec.source.getId());
+            from = heldCard != null ? heldCard.getPosition() : stackAnchor();
         }
         final List<Color> palette = CardColors.of(rec.source, canShow(rec.source));
         final AnimationStep step = new AnimationStep("resolve:" + rec.source.getName()).hold(STEP_GAP_MS);
@@ -630,7 +639,13 @@ public final class MatchAnimator {
                 }
             }
             if (striking) {
-                step.add(PanelAnim.lunge(sourcePanel, toPanelSpace(sourcePanel, to), LUNGE_REACH, LUNGE_MS));
+                // Drawn on the overlay rather than by displacing the panel, so the
+                // attacker passes over its neighbours and can leave its own row instead
+                // of being clipped at the edge of its battlefield.
+                final CardSnapshot snap = CardSnapshot.capture(sourcePanel, layer);
+                step.add(snap != null
+                        ? OverlayFlight.lunge(sourcePanel, snap, to, LUNGE_REACH, LUNGE_MS)
+                        : PanelAnim.lunge(sourcePanel, toPanelSpace(sourcePanel, to), LUNGE_REACH, LUNGE_MS));
                 queue.enqueue(step);
             }
         }
@@ -796,12 +811,49 @@ public final class MatchAnimator {
                     continue;
                 }
             }
-            // Tokens have no prior zone to leave, so they never raise a change-zone
-            // event; treat their first appearance as an arrival too.
-            if (expected || card.isToken()) {
+            // A token is genuinely created here rather than coming from anywhere, so
+            // fading it up is the honest depiction. Everything else was somewhere a
+            // moment ago and should be seen travelling from it.
+            if (card.isToken()) {
                 clock.addFree(PanelAnim.fadeIn(panel, 460));
+            } else if (expected) {
+                flyInFrom(panel, card);
             }
         }
+    }
+
+    /**
+     * Show a permanent arriving from the zone it came out of - a graveyard, an exile, an
+     * opponent's battlefield - rather than appearing where it landed.
+     * <p>
+     * Falls back to a fade when the origin cannot be located on screen, which is better
+     * than flying in from an arbitrary point.
+     */
+    private void flyInFrom(final CardPanel panel, final CardView card) {
+        final ZoneType from;
+        synchronized (this) {
+            from = arrivedFrom.remove(card.getId());
+        }
+        final Point origin = originOf(from, card);
+        final CardSnapshot snap = origin == null ? null : CardSnapshot.capture(panel, layer);
+        if (snap == null) {
+            clock.addFree(PanelAnim.fadeIn(panel, 460));
+            return;
+        }
+        clock.addFree(OverlayFlight.arrive(panel, snap, origin, 520));
+    }
+
+    /** Roughly where a zone sits on screen, for a card entering play out of it. */
+    private Point originOf(final ZoneType zone, final CardView card) {
+        if (zone == null || card == null) {
+            return null;
+        }
+        if (zone == ZoneType.Stack) {
+            return stackAnchor();
+        }
+        // Hand, graveyard, library, exile and friends all live around their owner's
+        // area, and the avatar is the one part of it always on screen.
+        return avatarCentre(card.getOwner() != null ? card.getOwner() : card.getController());
     }
 
     // ------------------------------------------------------------------ geometry
