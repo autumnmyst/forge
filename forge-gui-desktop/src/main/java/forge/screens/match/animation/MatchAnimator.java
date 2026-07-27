@@ -270,6 +270,12 @@ public final class MatchAnimator {
                 }
             }
         }
+        // Something new is on the stack, so the previous effect is no longer what is
+        // happening. Without this its origin outlives it and the next token - or, before
+        // the zone check above, the next permanent - is drawn coming out of a card that
+        // had nothing to do with it.
+        lastEffectOrigin = null;
+
         // Recorded even with no targets: an untargeted ability still resolves, and gets
         // a pulse at its source rather than a line to anywhere.
         synchronized (pendingCasts) {
@@ -823,12 +829,19 @@ public final class MatchAnimator {
                 return hand;
             }
         }
-        if (lastEffectOrigin != null) {
-            // Whatever just resolved was a card on the board - a permanent activating an
-            // ability, or a trigger. Its own card is the honest origin.
+        if (from == null && lastEffectOrigin != null) {
+            // Created rather than moved - a token. It comes from whatever made it, which
+            // is the one case where the source is not a zone at all.
+            //
+            // Deliberately restricted to that case. A card that moved out of a real zone
+            // always has a better answer below, and consulting the last effect for those
+            // meant a creature spell resolving could be drawn as though it came out of
+            // whichever permanent last used an ability.
             return lastEffectOrigin;
         }
-        // Nothing else to come from: it resolved off the stack.
+        // Moved from somewhere: off the stack, or pulled out of a graveyard or exile by
+        // something that was itself on the stack. Either way the stack is where it came
+        // into play from.
         return stackAnchor();
     }
 
