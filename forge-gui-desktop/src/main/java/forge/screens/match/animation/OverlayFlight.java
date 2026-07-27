@@ -48,14 +48,6 @@ public final class OverlayFlight extends Anim {
                 0.35f, true, durationMs);
     }
 
-    /** Travel from where the card was to where it now is, and stay, for a zone change. */
-    public static OverlayFlight arrive(final CardPanel panel, final CardSnapshot snap,
-            final Point origin, final long durationMs) {
-        final Point now = snap.getCenter();
-        return new OverlayFlight(panel, snap, origin.x - now.x, origin.y - now.y,
-                1f, false, durationMs);
-    }
-
     private OverlayFlight(final CardPanel panel, final CardSnapshot snap, final int dx, final int dy,
             final float outFraction, final boolean returns, final long durationMs) {
         super(durationMs);

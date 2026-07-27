@@ -68,44 +68,6 @@ public final class PanelAnim {
         };
     }
 
-    /** Fade a card out in place, for a permanent about to be removed. */
-    public static Anim fadeOut(final CardPanel panel, final long durationMs) {
-        return new Base(panel, durationMs) {
-            @Override
-            protected void update(final float t) {
-                if (panel == null) {
-                    return;
-                }
-                panel.setRenderAlpha(1f - Ease.in(t));
-                panel.setRenderScale(Ease.lerp(1f, 0.88f, t));
-                touch();
-            }
-        };
-    }
-
-    /**
-     * Drive a card from a displacement back to its laid-out position - the settle a
-     * permanent makes after being dropped onto the battlefield.
-     *
-     * @param fromDx starting offset from where layout has put the panel.
-     */
-    public static Anim slideFrom(final CardPanel panel, final int fromDx, final int fromDy,
-            final long durationMs) {
-        return new Base(panel, durationMs) {
-            @Override
-            protected void update(final float t) {
-                if (panel == null) {
-                    return;
-                }
-                final float e = Ease.backOut(t);
-                panel.setRenderOffset(fromDx * (1 - e), fromDy * (1 - e));
-                // Unwind the drag tilt over the first half, so it lands square.
-                panel.setRenderRotation(Math.toRadians(6) * (1 - Ease.out(Math.min(1f, t * 2f))));
-                touch();
-            }
-        };
-    }
-
     /**
      * Throw a card toward a point and let it fall back - one attacker striking one
      * target. A double strike plays this twice because the game deals damage twice; a

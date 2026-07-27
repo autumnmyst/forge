@@ -541,6 +541,16 @@ public final class CMatchUI
 
     @Override
     public void updateZones(final Iterable<PlayerZoneUpdate> zonesToUpdate) {
+        // Wait for the animations already playing before redrawing the board, so a
+        // creature is not gone from the battlefield while its death is still on screen.
+        // The caller has already copied this collection, so it is safe to hold on to.
+        if (animator.defer("zones", () -> applyZoneUpdates(zonesToUpdate))) {
+            return;
+        }
+        applyZoneUpdates(zonesToUpdate);
+    }
+
+    private void applyZoneUpdates(final Iterable<PlayerZoneUpdate> zonesToUpdate) {
         for (final PlayerZoneUpdate update : zonesToUpdate) {
             final PlayerView owner = update.getPlayer();
 
