@@ -6,8 +6,11 @@ import java.awt.event.MouseEvent;
 
 import javax.swing.SwingUtilities;
 
+import org.tinylog.Logger;
+
 import forge.game.card.CardView;
 import forge.game.player.PlayerView;
+import forge.interfaces.IGameController;
 import forge.localinstance.properties.ForgePreferences.FPref;
 import forge.model.FModel;
 import forge.screens.match.CMatchUI;
@@ -57,6 +60,32 @@ public final class DragToPlay extends CardPanelMouseAdapter {
     }
 
     /**
+     * Whether this card could be played by clicking it right now.
+     * <p>
+     * A card must not be picked up outside the player's own priority window. Before the
+     * first turn, during mulligans, and whenever it is someone else's window there is no
+     * input that would accept a card being played, and driving the cast machinery anyway
+     * reaches {@code getGameController()}, which falls back to a spectator controller
+     * that does not exist yet.
+     * <p>
+     * Priority alone is not enough either - it says the player may act, not that this
+     * card is something the current input will take. {@code getActivateDescription} asks
+     * the live input directly, and is null unless it would really do something.
+     */
+    private boolean canPlayNow(final CardView card) {
+        if (card == null || player == null || !player.getHasPriority()) {
+            return false;
+        }
+        final IGameController controller = controller();
+        return controller != null && controller.getActivateDescription(card) != null;
+    }
+
+    /** The controller for this hand's own player; never the spectator fallback. */
+    private IGameController controller() {
+        return matchUI.getGameController(player);
+    }
+
+    /**
      * Whether the drag just finished was a play rather than a reorder, so the hand
      * controller can leave the card order alone.
      */
@@ -64,12 +93,50 @@ public final class DragToPlay extends CardPanelMouseAdapter {
         return consumed;
     }
 
+    /**
+     * Run a drag handler, swallowing any failure.
+     * <p>
+     * These are mouse callbacks on the EDT, so an exception escaping one would surface
+     * as a crash in the middle of a match. Dragging is a convenience over clicking, and
+     * no failure in it is worth taking the game down for - the drag is abandoned and
+     * clicking still works.
+     */
+    private void guard(final Runnable body) {
+        try {
+            body.run();
+        } catch (final RuntimeException e) {
+            Logger.error(e, "Drag-to-play failed; abandoning the drag");
+            try {
+                finishDrag();
+            } catch (final RuntimeException ignored) {
+                // Already failing; do not mask the original cause.
+            }
+        }
+    }
+
     @Override
     public void mouseDragStart(final CardPanel dragPanel, final MouseEvent evt) {
+        guard(() -> onDragStart(dragPanel, evt));
+    }
+
+    @Override
+    public void mouseDragged(final CardPanel dragPanel, final int dragOffsetX, final int dragOffsetY,
+            final MouseEvent evt) {
+        guard(() -> onDragged(evt));
+    }
+
+    @Override
+    public void mouseDragEnd(final CardPanel dragPanel, final MouseEvent evt) {
+        guard(this::onDragEnd);
+    }
+
+    private void onDragStart(final CardPanel dragPanel, final MouseEvent evt) {
         consumed = false;
         armed = false;
         sourcePanel = null;
-        if (!isEnabled() || dragPanel == null || dragPanel.getCard() == null) {
+        sourceCard = null;
+        if (!isEnabled() || dragPanel == null || !canPlayNow(dragPanel.getCard())) {
+            // Not playable right now, so this drag is a hand reorder like it always was.
             return;
         }
         final CardSnapshot snap = CardSnapshot.capture(dragPanel, animator.getLayer());
@@ -85,9 +152,7 @@ public final class DragToPlay extends CardPanelMouseAdapter {
         dragPanel.repaint();
     }
 
-    @Override
-    public void mouseDragged(final CardPanel dragPanel, final int dragOffsetX, final int dragOffsetY,
-            final MouseEvent evt) {
+    private void onDragged(final MouseEvent evt) {
         if (ghost == null || sourcePanel == null) {
             return;
         }
@@ -106,8 +171,7 @@ public final class DragToPlay extends CardPanelMouseAdapter {
         }
     }
 
-    @Override
-    public void mouseDragEnd(final CardPanel dragPanel, final MouseEvent evt) {
+    private void onDragEnd() {
         if (ghost == null) {
             return;
         }
@@ -125,8 +189,9 @@ public final class DragToPlay extends CardPanelMouseAdapter {
         // The prompt only offers Auto when the whole cost is payable from untapped
         // sources. If it is not offering, the cast needs more decisions and the normal
         // prompts take over from here.
-        if (matchUI.isAutoPayOffered()) {
-            matchUI.getGameController().selectButtonOk();
+        final IGameController controller = controller();
+        if (controller != null && matchUI.isAutoPayOffered()) {
+            controller.selectButtonOk();
             if (sourceCard != null) {
                 animator.slideIntoPlace(sourceCard, toScreen(drop));
             }
@@ -136,14 +201,19 @@ public final class DragToPlay extends CardPanelMouseAdapter {
     /** Begin the cast, exactly as a left click on the card would. */
     private void arm() {
         armed = true;
-        if (sourcePanel == null || sourcePanel.getCard() == null) {
+        if (sourcePanel == null) {
             return;
         }
-        sourceCard = sourcePanel.getCard();
+        // Re-checked rather than trusted from drag start: priority can pass while the
+        // card is still being held.
+        final CardView card = sourcePanel.getCard();
+        if (!canPlayNow(card)) {
+            return;
+        }
+        sourceCard = card;
         // A synthetic trigger event keeps the multi-ability popup working; if one opens,
         // that is the "needs more steps" path and the drag simply stops mattering.
-        matchUI.getGameController().selectCard(sourceCard, null,
-                new MouseTriggerEvent(syntheticEvent()));
+        controller().selectCard(sourceCard, null, new MouseTriggerEvent(syntheticEvent()));
     }
 
     /** Pull the card back out of the battlefield before releasing: undo the cast. */
@@ -158,8 +228,9 @@ public final class DragToPlay extends CardPanelMouseAdapter {
         }
         // Only retract while the prompt is still willing to be cancelled. Once the game
         // has moved past the payment there is nothing here that should be undoing it.
-        if (matchUI.isCancelOffered()) {
-            matchUI.getGameController().selectButtonCancel();
+        final IGameController controller = controller();
+        if (controller != null && matchUI.isCancelOffered()) {
+            controller.selectButtonCancel();
         }
         sourceCard = null;
     }
