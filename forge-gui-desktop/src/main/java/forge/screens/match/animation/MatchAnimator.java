@@ -84,8 +84,6 @@ public final class MatchAnimator {
     private final Set<Integer> arriving = new HashSet<>();
     /** Zone each arriving card came out of; null means it was created, i.e. a token. */
     private final Map<Integer, ZoneType> arrivedFrom = new HashMap<>();
-    /** Positions measured before a source panel was destroyed, for lands leaving hand. */
-    private final Map<Integer, Point> arrivalOrigin = new HashMap<>();
 
     /** Damage grouped by source, flushed on the next EDT pass. See {@link #flushDamage()}. */
     private final Map<Integer, DamageGroup> pendingDamage = new LinkedHashMap<>();
@@ -133,7 +131,6 @@ public final class MatchAnimator {
         departing.clear();
         arriving.clear();
         arrivedFrom.clear();
-        arrivalOrigin.clear();
         pendingDamage.clear();
         synchronized (pendingCasts) {
             pendingCasts.clear();
@@ -299,11 +296,12 @@ public final class MatchAnimator {
                 }
             }
         }
-        // Something new is on the stack, so the previous effect is no longer what is
-        // happening. Without this its origin outlives it and the next token - or, before
-        // the zone check above, the next permanent - is drawn coming out of a card that
-        // had nothing to do with it.
-        lastEffectOrigin = null;
+        // Show it being put on the stack: out of the permanent whose ability it is, or
+        // out of the player who cast it. This is the half of the story the stack itself
+        // cannot tell, and it happens once, here, at cast time.
+        final CardView host = si.getSourceCard();
+        final PlayerView activator = si.getActivatingPlayer();
+        FThreads.invokeInEdtLater(() -> enqueueOntoStack(host, activator));
 
         // Recorded even with no targets: an untargeted ability still resolves, and gets
         // a pulse at its source rather than a line to anywhere.
@@ -342,19 +340,34 @@ public final class MatchAnimator {
         FThreads.invokeInEdtLater(() -> enqueueResolution(rec));
     }
 
+    /**
+     * Show a spell or ability arriving on the stack, out of whatever put it there.
+     * <p>
+     * A permanent's own activated or triggered ability comes out of that permanent; a
+     * spell a player casts comes out of the player, since the card was in a hand nobody
+     * else can see. This is the half of the story the stack cannot tell, and it plays
+     * once, here, when the thing is put there - after which the stack is the origin for
+     * everything the resolution goes on to do.
+     */
+    private void enqueueOntoStack(final CardView host, final PlayerView activator) {
+        final Point to = stackAnchor();
+        Point from = centreOf(host);
+        if (from == null) {
+            from = avatarCentre(activator);
+        }
+        if (from == null || to == null) {
+            return;
+        }
+        queue.enqueue(new AnimationStep("cast:" + (host != null ? host.getName() : "ability"))
+                .add(new BeamAnim(from, to, CardColors.of(host, canShow(host)), 1f, 420)));
+        clock.start();
+    }
+
     private void enqueueResolution(final CastRecord rec) {
-        // A resolving spell has no card panel anywhere - it is on the stack, which the
-        // desktop client renders as text rather than cards. Its beams therefore start
-        // from wherever the card is being carried, falling back to the stack itself.
-        // Requiring a panel here is why targeted spells drew nothing at all.
-        // A source that is itself on the board - a permanent using an activated ability,
-        // or a trigger firing - is a far better origin than the stack. Only a card that
-        // is on the stack has nowhere else to come from.
-        final Point onBoard = centreOf(rec.source);
-        final Point from = onBoard != null ? onBoard : stackAnchor();
-        // Remembered for anything this resolution puts onto the battlefield. Null when
-        // the source was on the stack, which is the signal to fall back to the stack.
-        lastEffectOrigin = onBoard;
+        // Everything a resolution does comes out of the stack, because that is where the
+        // spell or ability is. Its trip out of its source was already shown when it was
+        // put there, so repeating that here would tell the same half of the story twice.
+        final Point from = stackAnchor();
         final List<Color> palette = CardColors.of(rec.source, canShow(rec.source));
         final AnimationStep step = new AnimationStep("resolve:" + rec.source.getName());
 
@@ -375,23 +388,15 @@ public final class MatchAnimator {
             }
         }
         if (step.isEmpty()) {
-            // Nothing was targeted - an activated or triggered ability that just does its
-            // work. It still deserves to be seen happening, so pulse at its source.
-            step.add(new ImpactAnim(from, palette, 2f, 420, 0f));
+            // The catch-all: nothing targeted and nothing to point at, so the ability
+            // just did its work. Sparked at the source card if it is still on the board -
+            // a prowess trigger, say - and at the stack if it is not.
+            final Point at = centreOf(rec.source);
+            step.add(new ImpactAnim(at != null ? at : from, palette, 2f, 420, 0f));
         }
         queue.enqueue(step);
         clock.start();
     }
-
-    /**
-     * Where the most recent resolution happened, used as the origin for a token.
-     * <p>
-     * Tokens are created rather than moved, so they raise no change-zone event with a
-     * source, and {@code GameEventTokenCreated} carries no payload at all. Attributing
-     * one to whatever just resolved is the only handle available, and is right in the
-     * overwhelming majority of cases - a token appears because something made it.
-     */
-    private volatile Point lastEffectOrigin;
 
     /**
      * Show a permanent arriving: particles run from wherever it came from to the slot it
@@ -409,18 +414,19 @@ public final class MatchAnimator {
         panel.setRenderAlpha(0f);
         panel.repaint();
 
+        // Always a queued step, even with nowhere to draw a beam from. The reveal has to
+        // be the step's own ending or a card can be left hidden: the panel was blanked
+        // above, and only this puts it back.
         final Point dest = centreOf(panel);
-        if (origin == null || dest == null) {
-            clock.addFree(PanelAnim.fadeIn(panel, 320));
-            return;
-        }
-        final List<Color> palette = CardColors.of(card, canShow(card));
-        queue.enqueue(new AnimationStep("arrive:" + card.getName())
-                .add(new BeamAnim(origin, dest, palette, 1f, 520))
+        final AnimationStep step = new AnimationStep("arrive:" + card.getName())
                 .after(() -> {
                     panel.clearRenderTransform();
                     clock.addFree(PanelAnim.fadeIn(panel, 320));
-                }));
+                });
+        if (origin != null && dest != null) {
+            step.add(new BeamAnim(origin, dest, CardColors.of(card, canShow(card)), 1f, 520));
+        }
+        queue.enqueue(step);
         clock.start();
     }
 
@@ -767,19 +773,10 @@ public final class MatchAnimator {
             // Not a tracked departure - a re-layout or a match teardown, not a death.
             return;
         }
-        if (to == ZoneType.Battlefield) {
-            // A land on its way to the table. This is the last moment its hand slot can
-            // be measured, and that slot is where its particles will start from.
-            final Point at = centreOf(panel);
-            if (at != null) {
-                synchronized (this) {
-                    arrivalOrigin.put(panel.getCard().getId(), at);
-                }
-            }
+        if (to == ZoneType.Battlefield || to == ZoneType.Stack) {
+            // Beginning a cast, or crossing onto the table. Neither is a departure; both
+            // reappear under their own animation.
             return;
-        }
-        if (to == ZoneType.Stack) {
-            return; // beginning a cast, not leaving the board
         }
         final CardSnapshot snap = CardSnapshot.capture(panel, layer);
         if (snap == null) {
@@ -804,18 +801,16 @@ public final class MatchAnimator {
                 continue;
             }
             final ZoneType from;
-            final Point captured;
             final boolean expected;
             synchronized (this) {
                 expected = arriving.remove(card.getId());
                 from = arrivedFrom.remove(card.getId());
-                captured = arrivalOrigin.remove(card.getId());
             }
             if (!expected) {
                 // Not a tracked arrival - a re-layout, or the board being rebuilt.
                 continue;
             }
-            enqueueArrival(panel, card, originFor(from, captured, card));
+            enqueueArrival(panel, card, originFor(from, card));
         }
     }
 
@@ -841,58 +836,22 @@ public final class MatchAnimator {
     /**
      * Where a permanent's arrival particles should start.
      *
-     * @param from     the zone it came out of, or null if it was created rather than moved.
-     * @param captured a position measured before the source panel was destroyed.
+     * @param from the zone it came out of, or null if it was created rather than moved.
      */
-    private Point originFor(final ZoneType from, final Point captured, final CardView card) {
-        if (captured != null) {
-            return captured; // measured in the exact slot it left
+    private Point originFor(final ZoneType from, final CardView card) {
+        if (from == null || from == ZoneType.Stack) {
+            // Resolved off the stack, or created by something that was on it - a token.
+            // Either way the stack is what produced it.
+            return stackAnchor();
         }
-        if (from == ZoneType.Hand) {
-            // A land. Its own hand slot is usually not measurable in time - the
-            // battlefield is refreshed before the hand, so the card's panel still exists
-            // when this runs and is gone a moment later. The hand area as a whole reads
-            // the same to the eye and does not depend on that ordering.
-            final Point hand = handAreaCentre(card);
-            if (hand != null) {
-                return hand;
-            }
-        }
-        if (from == null && lastEffectOrigin != null) {
-            // Created rather than moved - a token. It comes from whatever made it, which
-            // is the one case where the source is not a zone at all.
-            //
-            // Deliberately restricted to that case. A card that moved out of a real zone
-            // always has a better answer below, and consulting the last effect for those
-            // meant a creature spell resolving could be drawn as though it came out of
-            // whichever permanent last used an ability.
-            return lastEffectOrigin;
-        }
-        // Moved from somewhere: off the stack, or pulled out of a graveyard or exile by
-        // something that was itself on the stack. Either way the stack is where it came
-        // into play from.
-        return stackAnchor();
-    }
-
-    /** Middle of a player's hand area, for something coming out of it. */
-    private Point handAreaCentre(final CardView card) {
-        if (card == null) {
-            return null;
-        }
-        final PlayerView owner = card.getOwner() != null ? card.getOwner() : card.getController();
-        if (owner == null) {
-            return null;
-        }
-        try {
-            final VHand hand = matchUI.getHandFor(owner);
-            final Rectangle bounds = hand == null ? null : boundsInLayer(hand.getHandArea());
-            if (bounds != null && bounds.width > 0) {
-                return new Point(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
-            }
-        } catch (final RuntimeException e) {
-            // Hand not laid out, or not shown for this player.
-        }
-        return null;
+        // Entered play directly out of a hand, library, graveyard or exile without ever
+        // being on the stack. Those zones are the player's, and drawing it out of the
+        // player reads correctly from both sides of the table - which the hand does not,
+        // since you cannot see your opponent's.
+        final PlayerView owner = card == null ? null
+                : (card.getOwner() != null ? card.getOwner() : card.getController());
+        final Point avatar = avatarCentre(owner);
+        return avatar != null ? avatar : stackAnchor();
     }
 
     // ------------------------------------------------------------------ geometry
