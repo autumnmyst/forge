@@ -32,6 +32,16 @@ public final class AnimationClock {
     private final List<Anim> free = new ArrayList<>(4);
 
     private long lastTickNanos;
+    /** Playback rate from preferences; below 1 slows everything down. */
+    private volatile float userSpeed = 1f;
+
+    /**
+     * Set the playback rate. Applied here rather than inside the queue so it reaches
+     * every animation - the queued steps, the free ones, and the cards in flight alike.
+     */
+    public void setUserSpeed(final float speed) {
+        this.userSpeed = Math.max(0.1f, Math.min(5f, speed));
+    }
 
     public AnimationClock(final AnimationQueue queue, final AnimationLayer layer) {
         this.queue = queue;
@@ -89,6 +99,8 @@ public final class AnimationClock {
             deltaMs = FRAME_MS;
         }
 
+        // Scale once, here, so nothing downstream has to remember to honour the setting.
+        deltaMs = Math.max(1L, (long) (deltaMs * userSpeed));
         boolean active = queue.tick(deltaMs);
 
         final long dt = deltaMs;

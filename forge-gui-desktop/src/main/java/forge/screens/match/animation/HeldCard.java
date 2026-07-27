@@ -26,9 +26,10 @@ import forge.view.arcane.CardPanel;
 public final class HeldCard extends Anim {
 
     /** Grace period after resolution for a permanent's panel to appear before dissolving. */
-    private static final long RELEASE_GRACE_MS = 500L;
-    private static final float FOLLOW = 0.18f;
-    private static final long DISSOLVE_MS = 420L;
+    private static final long RELEASE_GRACE_MS = 700L;
+    /** Fraction of the remaining gap closed per 16ms; lower drifts more slowly. */
+    private static final float FOLLOW = 0.12f;
+    private static final long DISSOLVE_MS = 620L;
 
     private enum Phase { MOVING, DISSOLVING, DONE }
 
@@ -105,7 +106,7 @@ public final class HeldCard extends Anim {
         }
         moveTo(centre, 1);
         releaseFuseMs = -1;
-        landingCountdownMs = 260L;
+        landingCountdownMs = 420L;
     }
 
     private long landingCountdownMs = -1;
@@ -123,11 +124,14 @@ public final class HeldCard extends Anim {
 
     @Override
     protected void update(final float t) {
-        final long dt = 16L;
+        final long dt = getDeltaMs();
         if (phase == Phase.MOVING) {
-            x += (targetX - x) * FOLLOW;
-            y += (targetY - y) * FOLLOW;
-            scale += (targetScale - scale) * FOLLOW;
+            // Exponential approach, corrected for the real frame length so the speed
+            // setting and any dropped frames change how fast it travels, not how far.
+            final double follow = 1 - Math.pow(1 - FOLLOW, dt / 16.0);
+            x += (targetX - x) * follow;
+            y += (targetY - y) * follow;
+            scale += (targetScale - scale) * follow;
 
             if (landingCountdownMs > 0) {
                 landingCountdownMs -= dt;

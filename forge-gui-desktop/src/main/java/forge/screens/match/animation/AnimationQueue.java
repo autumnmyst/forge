@@ -42,12 +42,6 @@ public final class AnimationQueue {
     private AnimationStep current;
     private long holdRemainingMs;
     private boolean paused;
-    private float userSpeed = 1f;
-
-    /** Playback rate from preferences; 1 is the designed pace, higher is faster. */
-    public synchronized void setUserSpeed(final float speed) {
-        this.userSpeed = Math.max(0.1f, speed);
-    }
 
     /**
      * Append a step. Safe to call from the game thread - the step is not touched until
@@ -148,12 +142,13 @@ public final class AnimationQueue {
         }
     }
 
+    /** Playback rate from the backlog alone; the user setting is applied by the clock. */
     private float speedScale() {
         final int depth = pending.size();
         if (depth <= CATCHUP_DEPTH) {
-            return userSpeed;
+            return 1f;
         }
-        return userSpeed * Math.min(MAX_SCALE, 1f + (depth - CATCHUP_DEPTH) * 0.5f);
+        return Math.min(MAX_SCALE, 1f + (depth - CATCHUP_DEPTH) * 0.5f);
     }
 
     /** Promote the next queued step to current and run its {@code before} hook. */

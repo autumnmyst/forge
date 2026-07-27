@@ -56,8 +56,10 @@ public final class MatchAnimator {
     private static final int AOE_TARGET_THRESHOLD = 3;
     /** How far an attacker travels toward what it hits, as a fraction of the gap. */
     private static final float LUNGE_REACH = 0.55f;
-    private static final long LUNGE_MS = 420L;
-    private static final long IMPACT_MS = 560L;
+    private static final long LUNGE_MS = 620L;
+    private static final long IMPACT_MS = 800L;
+    /** Beat left between consecutive events so a run of them stays readable. */
+    private static final long STEP_GAP_MS = 180L;
     /**
      * When the collision sparks fire, as a fraction of {@link #IMPACT_MS}. Matched to
      * the point the lunge reaches full extension, so the sparks appear on contact
@@ -105,7 +107,7 @@ public final class MatchAnimator {
 
     /** Re-read preferences; called when the settings screen changes them. */
     public void refreshPrefs() {
-        queue.setUserSpeed(FModel.getPreferences().getPrefInt(FPref.UI_ANIMATION_SPEED) / 100f);
+        clock.setUserSpeed(FModel.getPreferences().getPrefInt(FPref.UI_ANIMATION_SPEED) / 100f);
     }
 
     /**
@@ -448,7 +450,7 @@ public final class MatchAnimator {
             return;
         }
         final List<Color> palette = CardColors.of(rec.source, canShow(rec.source));
-        final AnimationStep step = new AnimationStep("resolve:" + rec.source.getName());
+        final AnimationStep step = new AnimationStep("resolve:" + rec.source.getName()).hold(STEP_GAP_MS);
 
         // One beam per target however many there are, the way the targeting arrows draw
         // one arrow per target. A spell that names five creatures is still hitting five
@@ -457,13 +459,13 @@ public final class MatchAnimator {
         for (final CardView c : rec.cardTargets) {
             final Point to = centreOf(c);
             if (to != null) {
-                step.add(new BeamAnim(from, to, palette, 1f, 480));
+                step.add(new BeamAnim(from, to, palette, 1f, 700));
             }
         }
         for (final PlayerView p : rec.playerTargets) {
             final Point to = avatarCentre(p);
             if (to != null) {
-                step.add(new BeamAnim(from, to, palette, 1f, 480));
+                step.add(new BeamAnim(from, to, palette, 1f, 700));
             }
         }
         if (!step.isEmpty()) {
@@ -599,14 +601,14 @@ public final class MatchAnimator {
 
         // A striking attacker gets one step per target so they play in sequence;
         // everything else resolves as a single step with its hits shown together.
-        AnimationStep shared = striking ? null : new AnimationStep("damage:" + g.source.getName());
+        AnimationStep shared = striking ? null : new AnimationStep("damage:" + g.source.getName()).hold(STEP_GAP_MS);
         for (final GameEntityView target : targets) {
             final Point to = target instanceof CardView cv ? centreOf(cv) : avatarCentre((PlayerView) target);
             if (to == null) {
                 continue;
             }
             final AnimationStep step = striking
-                    ? new AnimationStep("strike:" + g.source.getName())
+                    ? new AnimationStep("strike:" + g.source.getName()).hold(STEP_GAP_MS)
                     : shared;
             if (striking) {
                 // The card itself crosses the gap, so sparks only at the point of
@@ -614,17 +616,17 @@ public final class MatchAnimator {
                 step.add(new ImpactAnim(to, palette, g.total, IMPACT_MS, IMPACT_TRIGGER));
             } else if (from != null) {
                 // Nothing moves, so the effect has to travel on its own.
-                step.add(new BeamAnim(from, to, palette, g.total, 460));
+                step.add(new BeamAnim(from, to, palette, g.total, 680));
             }
             if (target instanceof CardView cv) {
                 final CardPanel tp = findPanel(cv);
                 if (tp != null && from != null) {
-                    step.add(PanelAnim.flinch(tp, toPanelSpace(tp, from), 260));
+                    step.add(PanelAnim.flinch(tp, toPanelSpace(tp, from), 380));
                 }
                 // If that blocker hit back, it recoils together with the attacker rather
                 // than in a beat of its own.
                 if (striking && counterHits.getOrDefault(g.source.getId(), Set.of()).contains(cv.getId())) {
-                    step.add(PanelAnim.flinch(sourcePanel, toPanelSpace(sourcePanel, to), 260));
+                    step.add(PanelAnim.flinch(sourcePanel, toPanelSpace(sourcePanel, to), 380));
                 }
             }
             if (striking) {
@@ -694,7 +696,7 @@ public final class MatchAnimator {
     /** An effect that hit enough things to be worth showing as a sweep over each board. */
     private void enqueueAreaEffect(final DamageGroup g) {
         final List<Color> palette = CardColors.of(g.source, canShow(g.source));
-        final AnimationStep step = new AnimationStep("aoe:" + g.source.getName());
+        final AnimationStep step = new AnimationStep("aoe:" + g.source.getName()).hold(STEP_GAP_MS);
 
         final Set<PlayerView> affected = new HashSet<>();
         for (final CardView target : g.cardTargets) {
@@ -707,7 +709,7 @@ public final class MatchAnimator {
         for (final PlayerView p : affected) {
             final Rectangle area = battlefieldBounds(p);
             if (area != null) {
-                step.add(new BurstAnim(area, palette, Math.min(220, 60 + g.total * 10), 640));
+                step.add(new BurstAnim(area, palette, Math.min(220, 60 + g.total * 10), 900));
             }
         }
         // Still flinch each victim, so it stays clear which permanents were hit.
@@ -715,7 +717,7 @@ public final class MatchAnimator {
             final CardPanel tp = findPanel(target);
             final Point origin = centreOf(g.source);
             if (tp != null && origin != null) {
-                step.add(PanelAnim.flinch(tp, toPanelSpace(tp, origin), 300));
+                step.add(PanelAnim.flinch(tp, toPanelSpace(tp, origin), 380));
             }
         }
         if (!step.isEmpty()) {
@@ -761,8 +763,8 @@ public final class MatchAnimator {
         // The real panel is about to vanish either way, so the ghost runs free of the
         // queue rather than holding up the events behind it.
         clock.addFree(to == ZoneType.Hand || to == ZoneType.Library
-                ? GhostAnim.flyTo(snap, handAnchor(panel.getCard()), 420)
-                : GhostAnim.fadeOut(snap, 520));
+                ? GhostAnim.flyTo(snap, handAnchor(panel.getCard()), 620)
+                : GhostAnim.fadeOut(snap, 760));
     }
 
     /**
@@ -797,7 +799,7 @@ public final class MatchAnimator {
             // Tokens have no prior zone to leave, so they never raise a change-zone
             // event; treat their first appearance as an arrival too.
             if (expected || card.isToken()) {
-                clock.addFree(PanelAnim.fadeIn(panel, 320));
+                clock.addFree(PanelAnim.fadeIn(panel, 460));
             }
         }
     }
