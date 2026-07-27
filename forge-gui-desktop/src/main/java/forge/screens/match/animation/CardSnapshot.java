@@ -23,10 +23,12 @@ public final class CardSnapshot {
 
     private final BufferedImage image;
     private final Rectangle bounds;
+    private final Point cardCentre;
 
-    private CardSnapshot(final BufferedImage image, final Rectangle bounds) {
+    private CardSnapshot(final BufferedImage image, final Rectangle bounds, final Point cardCentre) {
         this.image = image;
         this.bounds = bounds;
+        this.cardCentre = cardCentre;
     }
 
     public BufferedImage getImage() {
@@ -38,8 +40,13 @@ public final class CardSnapshot {
         return new Rectangle(bounds);
     }
 
+    /**
+     * Centre of the card face, which is not the centre of {@link #getBounds()} - the
+     * panel reserves room around the card for its tap rotation, off-centre. Use this for
+     * anything aimed at the card and the bounds only for drawing the copy.
+     */
     public Point getCenter() {
-        return new Point(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+        return new Point(cardCentre);
     }
 
     /**
@@ -69,7 +76,10 @@ public final class CardSnapshot {
             }
             final Point at = SwingUtilities.convertPoint(panel.getParent(),
                     panel.getX(), panel.getY(), reference);
-            return new CardSnapshot(img, new Rectangle(at.x, at.y, w, h));
+            final Point face = SwingUtilities.convertPoint(panel.getParent(),
+                    panel.getCardX() + panel.getCardWidth() / 2,
+                    panel.getCardY() + panel.getCardHeight() / 2, reference);
+            return new CardSnapshot(img, new Rectangle(at.x, at.y, w, h), face);
         } catch (final RuntimeException e) {
             // Panels mid-teardown can throw from paint; losing one ghost is harmless.
             return null;

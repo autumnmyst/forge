@@ -185,7 +185,14 @@ public final class MatchAnimator {
         if (playSound == null) {
             return false;
         }
-        return defer("sound", () -> soundThread.execute(playSound));
+        return defer("sound", () -> {
+            // The match can end while clips are still queued behind animations, and the
+            // executor is shut down as part of that teardown. A sound nobody will hear
+            // is not worth an exception.
+            if (!soundThread.isShutdown()) {
+                soundThread.execute(playSound);
+            }
+        });
     }
 
     // ------------------------------------------------------------------ event intake
@@ -751,7 +758,10 @@ public final class MatchAnimator {
      */
     private void enqueueDirectHits(final DamageGroup g, final Map<Integer, Set<Integer>> counterHits) {
         final CardPanel sourcePanel = findPanel(g.source);
-        final Point from = centreOf(g.source);
+        // A damage spell has no panel - it is on the stack while it burns things - so its
+        // beams come from there. Requiring a panel meant such a spell drew nothing at all.
+        final Point onBoard = centreOf(g.source);
+        final Point from = onBoard != null ? onBoard : stackAnchor();
         final List<Color> palette = CardColors.of(g.source, canShow(g.source));
         final List<GameEntityView> targets = orderTargets(g);
         if (targets.isEmpty()) {
@@ -1104,8 +1114,13 @@ public final class MatchAnimator {
         if (parent == null || !parent.isShowing()) {
             return null;
         }
+        // The centre of the card face, not of the component. A card panel is far larger
+        // than the card it draws - it reserves room on every side for the tap rotation -
+        // and the face is not centred in that box, so using the component's middle puts
+        // every beam and impact noticeably off the card.
         return SwingUtilities.convertPoint(parent,
-                panel.getX() + panel.getWidth() / 2, panel.getY() + panel.getHeight() / 2, layer);
+                panel.getCardX() + panel.getCardWidth() / 2,
+                panel.getCardY() + panel.getCardHeight() / 2, layer);
     }
 
     /**
