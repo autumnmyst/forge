@@ -8,7 +8,6 @@ import javax.swing.SwingUtilities;
 
 import org.tinylog.Logger;
 
-import forge.card.mana.ManaCost;
 import forge.game.card.CardView;
 import forge.game.player.PlayerView;
 import forge.interfaces.IGameController;
@@ -23,16 +22,18 @@ import forge.view.arcane.util.CardPanelMouseAdapter;
 /**
  * Drag a card out of hand and drop it on the battlefield to play it.
  * <p>
- * The flow deliberately reuses the existing cast machinery rather than reimplementing
- * any of it. Pulling a card up onto the battlefield <em>arms</em> it, which starts the
- * normal cast exactly as a click would; the game then puts up its own payment prompt
- * and lights up the lands auto-tap would use, all while the card is still in the air.
- * Releasing presses the prompt's Auto button. Dragging back down cancels it.
+ * The gesture is entirely visual until it ends. Nothing is played, cancelled or
+ * answered while the card is moving; releasing it over your own battlefield plays it,
+ * by the same call a click makes, and everything after that is the ordinary cast.
  * <p>
- * The consequence is that anything the payment cannot settle by itself - choosing
- * targets, announcing X, an additional cost - simply falls through to the flow that
- * exists today: the card leaves the hand and the game asks its questions. Nothing here
- * needs to know which costs those are, because it never tries to pay them.
+ * Committing earlier was tried and does not work. A cast begins asking for targets and
+ * modal choices the moment the card clears the hand, and there is no way to answer
+ * those with the mouse button still down - the questions arrive mid-gesture, over a
+ * board the player is in the middle of dragging across.
+ * <p>
+ * So this class never needs to know which costs a card has or which prompts it will
+ * raise: it hands the card to the game and gets out of the way. The animator keeps
+ * carrying the picture of it from the point it was dropped until the cast is decided.
  * <p>
  * Dragging <em>within</em> the hand still reorders, untouched. The two gestures are
  * told apart by where the pointer is, not by how the drag started.
@@ -49,7 +50,6 @@ public final class DragToPlay extends CardPanelMouseAdapter {
     /** The card whose cast this drag started, so it can be cancelled or completed. */
     private CardView sourceCard;
     private DragGhost ghost;
-    private boolean armed;
     private boolean consumed;
 
     public DragToPlay(final CMatchUI matchUI, final PlayerView player, final MatchAnimator animator) {
@@ -86,27 +86,6 @@ public final class DragToPlay extends CardPanelMouseAdapter {
     /** The controller for this hand's own player; never the spectator fallback. */
     private IGameController controller() {
         return matchUI.getGameController(player);
-    }
-
-    /**
-     * Whether playing this card will put up a mana payment the player can watch.
-     * <p>
-     * Only such a card is committed early, when the pointer crosses onto the
-     * battlefield, so the payment prompt and auto-tap highlights are visible while it is
-     * still being held. Everything else waits for release.
-     * <p>
-     * A land, a zero-cost artifact or a free spell has nothing to pay, so committing it
-     * early would resolve it outright the instant the pointer entered the battlefield -
-     * the card would leave the hand mid-drag, still-held, and leave the drag operating
-     * on a panel the zone refresh has already disposed. Waiting for release also matches
-     * what the gesture means: you put the card down when you let go of it.
-     */
-    private static boolean needsPayment(final CardView card) {
-        if (card == null || card.getCurrentState() == null) {
-            return false;
-        }
-        final ManaCost cost = card.getCurrentState().getManaCost();
-        return cost != null && !cost.isNoCost() && !cost.isZero();
     }
 
     /**
@@ -156,7 +135,6 @@ public final class DragToPlay extends CardPanelMouseAdapter {
 
     private void onDragStart(final CardPanel dragPanel, final MouseEvent evt) {
         consumed = false;
-        armed = false;
         sourcePanel = null;
         sourceCard = null;
         if (!isEnabled() || dragPanel == null || !canPlayNow(dragPanel.getCard())) {
@@ -187,18 +165,11 @@ public final class DragToPlay extends CardPanelMouseAdapter {
         }
         ghost.setTarget(inLayer);
 
-        final boolean overField = isOverOwnBattlefield(inLayer);
-        ghost.setArmed(overField);
-        // Only a card with a cost to pay is committed here; the rest are played on
-        // release, so the ghost still shows as droppable without the card being gone.
-        if (!needsPayment(sourcePanel.getCard())) {
-            return;
-        }
-        if (overField && !armed) {
-            arm();
-        } else if (!overField && armed) {
-            disarm();
-        }
+        // Dragging is purely visual: nothing is played, cancelled or answered until the
+        // card is let go. Committing part-way through meant a spell began asking for
+        // targets and modal choices the instant the card cleared the hand, while it was
+        // still being held, and there is no sensible way to answer those mid-gesture.
+        ghost.setArmed(isOverOwnBattlefield(inLayer));
     }
 
     private void onDragEnd() {
@@ -206,102 +177,25 @@ public final class DragToPlay extends CardPanelMouseAdapter {
             return;
         }
         final Point drop = ghost.getPosition();
-        final boolean wasArmed = armed;
         final boolean overField = ghost.isArmed();
         final CardView held = sourcePanel == null ? null : sourcePanel.getCard();
-        // Once a cast has begun the card is no longer a hand card, wherever the pointer
-        // ended up. Claiming the drag stops the hand controller reordering a slot that
-        // is not there any more.
-        final boolean castStarted = sourceCard != null;
-        if (castStarted) {
-            // Hand the card over to the animator at the point it was released, so it
-            // carries on hovering there while the cost is paid rather than snapping back
-            // to the hand slot it came from.
-            animator.holdAt(sourceCard, snapshot, drop);
-        }
+        final CardSnapshot snap = snapshot;
         finishDrag();
-        consumed = castStarted;
 
-        if (!overField) {
-            // Released back over the hand: retract anything already begun and let the
-            // drag mean what it has always meant, a reorder.
-            cancelCast();
+        // Released anywhere but your own battlefield, or not playable right now: this
+        // was a hand reorder, and nothing has been touched.
+        if (!overField || !canPlayNow(held)) {
             return;
         }
-
-        if (!wasArmed) {
-            // Nothing to pay, so the play was held back until now. Start it here and let
-            // it run to completion on its own - this is the release that plays a land.
-            if (!canPlayNow(held)) {
-                return;
-            }
-            consumed = true;
-            sourceCard = held;
-            controller().selectCard(held, null, new MouseTriggerEvent(syntheticEvent(drop)));
-            animator.slideIntoPlace(held, toScreen(drop));
-            return;
-        }
-
         consumed = true;
-        // The prompt only offers Auto when the whole cost is payable from untapped
-        // sources. If it is not offering, the cast needs more decisions and the normal
-        // prompts take over from here.
-        final IGameController controller = controller();
-        if (controller != null && matchUI.isAutoPayOffered()) {
-            // No slide from here: a card that goes through the stack is already being
-            // carried by the animator from the moment it left the hand, and it lands
-            // itself once it resolves.
-            controller.selectButtonOk();
-        }
-    }
-
-    /** Begin the cast, exactly as a left click on the card would. */
-    private void arm() {
-        armed = true;
-        if (sourcePanel == null) {
-            return;
-        }
-        // Re-checked rather than trusted from drag start: priority can pass while the
-        // card is still being held.
-        final CardView card = sourcePanel.getCard();
-        if (!canPlayNow(card)) {
-            return;
-        }
-        sourceCard = card;
-        // Claim it before the cast starts: the card leaves the hand part-way through this
-        // call, and without the claim the hand's removal hook would drop a copy into the
-        // slot it just vacated while the real one is still under the cursor.
-        animator.reserveHold(sourceCard);
-        // A synthetic trigger event keeps the multi-ability popup working; if one opens,
-        // that is the "needs more steps" path and the drag simply stops mattering.
-        controller().selectCard(sourceCard, null, new MouseTriggerEvent(syntheticEvent()));
-    }
-
-    /** Pull the card back out of the battlefield before releasing: undo the cast. */
-    private void disarm() {
-        armed = false;
-        cancelCast();
-    }
-
-    private void cancelCast() {
-        if (sourceCard == null) {
-            return;
-        }
-        final CardView cancelling = sourceCard;
-        sourceCard = null;
-        animator.releaseHold(cancelling);
-        // Retract only the mana payment this drag put up. Targeting happens before
-        // payment, so by the time a targeted spell reaches the board the prompt asking
-        // for something is not ours - pressing its Cancel would abort the target
-        // selection the player is in the middle of and bounce the card back to hand,
-        // which is precisely what moving the pointer off the battlefield used to do.
-        if (!matchUI.isPaymentPrompt() || matchUI.isSelecting()) {
-            return;
-        }
-        final IGameController controller = controller();
-        if (controller != null && matchUI.isCancelOffered()) {
-            controller.selectButtonCancel();
-        }
+        sourceCard = held;
+        // Take the card over at the point it was let go, before the play begins. Playing
+        // it removes it from the hand, and without this the hand's removal hook would
+        // pick it up again from the empty slot it just left.
+        animator.holdAt(held, snap, drop);
+        // From here it is an ordinary play: whatever the cast needs - targets, choices,
+        // mana - it asks for in its own prompts, exactly as clicking the card would.
+        controller().selectCard(held, null, new MouseTriggerEvent(syntheticEvent(drop)));
     }
 
     private void finishDrag() {
@@ -319,7 +213,6 @@ public final class DragToPlay extends CardPanelMouseAdapter {
             }
             sourcePanel = null;
         }
-        armed = false;
         animator.getLayer().repaint();
     }
 

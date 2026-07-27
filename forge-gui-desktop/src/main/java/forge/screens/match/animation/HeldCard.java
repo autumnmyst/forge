@@ -197,13 +197,21 @@ public final class HeldCard extends Anim {
      * reads as waiting on the player rather than as a stuck animation.
      */
     private void drawWaitingGlow(final Graphics2D g) {
+        // Held back briefly: a card that is only passing through - a land on its way to
+        // the battlefield - should never flash a glow on the way past. Only one that is
+        // actually sitting and waiting picks it up.
+        final float strength = Ease.clamp01((ageMs - 350f) / 350f);
+        if (strength <= 0f) {
+            return;
+        }
         final double pulse = 0.5 + 0.5 * Math.sin(ageMs / 320.0);
         final Color tint = CardColors.brighten(palette.get(0), 0.5f);
-        for (int ring = 3; ring >= 1; ring--) {
-            final int pad = (int) (ring * 5 + pulse * 6);
-            g.setColor(CardColors.withAlpha(tint, (float) (0.11 * ring * (0.55 + 0.45 * pulse))));
+        for (int ring = 2; ring >= 1; ring--) {
+            final int pad = (int) (ring * 3 + pulse * 3);
+            g.setColor(CardColors.withAlpha(tint,
+                    (float) (0.13 * ring * (0.55 + 0.45 * pulse)) * strength));
             g.fillRoundRect(-width / 2 - pad, -height / 2 - pad,
-                    width + pad * 2, height + pad * 2, 18 + pad, 18 + pad);
+                    width + pad * 2, height + pad * 2, 12 + pad, 12 + pad);
         }
     }
 
