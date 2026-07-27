@@ -326,6 +326,26 @@ public class CardArea extends CardPanelContainer implements CardPanelMouseListen
      * out is at best meaningless and at worst fatal: {@code setComponentZOrder} throws
      * when the component belongs to another window.
      */
+    /**
+     * Take the floating drag image off screen without animating it anywhere.
+     * <p>
+     * Normally {@link Animation#moveCard} disposes of it at the end of the snap-back.
+     * When there is no snap-back to run it has to be removed here instead, or it stays
+     * parented in the layered pane above the whole board.
+     */
+    private static void discardDragAnimationPanel() {
+        final CardPanel panel = CardPanel.getDragAnimationPanel();
+        if (panel == null) {
+            return;
+        }
+        panel.setVisible(false);
+        final java.awt.Container parent = panel.getParent();
+        if (parent != null) {
+            parent.remove(panel);
+            parent.repaint();
+        }
+    }
+
     private boolean isStray(final CardPanel panel) {
         return panel == null || panel.getParent() != this || panel.getCard() == null;
     }
@@ -339,11 +359,17 @@ public class CardArea extends CardPanelContainer implements CardPanelMouseListen
         // back into a slot, so there is nothing left to animate once it has gone.
         super.mouseDragEnd(dragPanel, evt);
         this.doLayout();
-        if (isStray(dragPanel) || CardPanel.getDragAnimationPanel() == null) {
-            return;
-        }
-        final JRootPane rootPane = SwingUtilities.getRootPane(CardPanel.getDragAnimationPanel());
-        if (rootPane == null) {
+        final JRootPane rootPane = CardPanel.getDragAnimationPanel() == null ? null
+                : SwingUtilities.getRootPane(CardPanel.getDragAnimationPanel());
+        if (isStray(dragPanel) || rootPane == null) {
+            // The card was played out of this zone, so there is no slot to snap back to.
+            // The floating drag image must still be taken down: left in the layered pane
+            // it hovers over the board and swallows every click aimed at it, which looks
+            // like the card being stuck where it was dropped.
+            if (!isStray(dragPanel)) {
+                dragPanel.setDisplayEnabled(true);
+            }
+            discardDragAnimationPanel();
             return;
         }
         final JLayeredPane layeredPane = rootPane.getLayeredPane();

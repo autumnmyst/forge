@@ -165,6 +165,7 @@ public final class CMatchUI
      *  drag-to-play gesture can tell a droppable cast from one needing more decisions. */
     private volatile boolean autoPayOffered;
     private volatile boolean cancelOffered;
+    private volatile boolean paymentPromptUp;
 
     private FCollectionView<PlayerView> sortedPlayers;
     private final Map<String, String> avatarImages = new HashMap<>();
@@ -478,6 +479,11 @@ public final class CMatchUI
     /** Whether the prompt currently has a live Cancel, i.e. the action can still be retracted. */
     public boolean isCancelOffered() {
         return cancelOffered;
+    }
+
+    /** @see #paymentPromptUp */
+    public boolean isPaymentPrompt() {
+        return paymentPromptUp;
     }
 
     @Override
@@ -901,8 +907,13 @@ public final class CMatchUI
         // The payment input labels the OK button "Auto" and enables it only once the
         // cost is provably payable from untapped sources, so this is the cleanest signal
         // available that a dragged card can simply be dropped.
-        autoPayOffered = actualEnable1
-                && Localizer.getInstance().getMessage("lblAuto").equals(label1);
+        final boolean autoLabel = Localizer.getInstance().getMessage("lblAuto").equals(label1);
+        autoPayOffered = actualEnable1 && autoLabel;
+        // The label is "Auto" throughout the mana payment even when the cost cannot be
+        // met and the button is disabled, so this tracks "a payment is being asked for"
+        // rather than "it can be paid" - the two need telling apart, because a drag may
+        // only retract its own payment step and never a later prompt.
+        paymentPromptUp = autoLabel;
         cancelOffered = actualEnable2;
 
         btn1.setText(macroReplaying ? "" : label1);

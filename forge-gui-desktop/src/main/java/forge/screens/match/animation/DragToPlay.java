@@ -206,7 +206,12 @@ public final class DragToPlay extends CardPanelMouseAdapter {
         final boolean wasArmed = armed;
         final boolean overField = ghost.isArmed();
         final CardView held = sourcePanel == null ? null : sourcePanel.getCard();
+        // Once a cast has begun the card is no longer a hand card, wherever the pointer
+        // ended up. Claiming the drag stops the hand controller reordering a slot that
+        // is not there any more.
+        final boolean castStarted = sourceCard != null;
         finishDrag();
+        consumed = castStarted;
 
         if (!overField) {
             // Released back over the hand: retract anything already begun and let the
@@ -269,13 +274,19 @@ public final class DragToPlay extends CardPanelMouseAdapter {
         if (sourceCard == null) {
             return;
         }
-        // Only retract while the prompt is still willing to be cancelled. Once the game
-        // has moved past the payment there is nothing here that should be undoing it.
+        sourceCard = null;
+        // Retract only the mana payment this drag put up. Targeting happens before
+        // payment, so by the time a targeted spell reaches the board the prompt asking
+        // for something is not ours - pressing its Cancel would abort the target
+        // selection the player is in the middle of and bounce the card back to hand,
+        // which is precisely what moving the pointer off the battlefield used to do.
+        if (!matchUI.isPaymentPrompt() || matchUI.isSelecting()) {
+            return;
+        }
         final IGameController controller = controller();
         if (controller != null && matchUI.isCancelOffered()) {
             controller.selectButtonCancel();
         }
-        sourceCard = null;
     }
 
     private void finishDrag() {
@@ -285,8 +296,12 @@ public final class DragToPlay extends CardPanelMouseAdapter {
             ghost = null;
         }
         if (sourcePanel != null) {
-            sourcePanel.clearRenderTransform();
-            sourcePanel.repaint();
+            // Only if it still holds a card: a panel whose card has been played is
+            // already disposed, and touching it revives an unpaintable component.
+            if (sourcePanel.getCard() != null) {
+                sourcePanel.clearRenderTransform();
+                sourcePanel.repaint();
+            }
             sourcePanel = null;
         }
         armed = false;
