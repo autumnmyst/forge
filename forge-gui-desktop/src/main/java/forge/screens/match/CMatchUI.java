@@ -469,6 +469,11 @@ public final class CMatchUI
         animator.receiveGameEvent(event);
     }
 
+    @Override
+    public boolean deferGameEventSound(final Runnable playSound) {
+        return animator.deferSound(playSound);
+    }
+
 
     @Override
     public void setCard(final CardView c) {
@@ -993,6 +998,16 @@ public final class CMatchUI
 
     @Override
     public void finishGame() {
+        // Let the board finish playing out before the win/lose screen covers it. The
+        // last blow of a game is the one most worth seeing, and it was being hidden by
+        // the result the moment the game thread reached it.
+        if (animator.defer("finish", this::showGameResult)) {
+            return;
+        }
+        showGameResult();
+    }
+
+    private void showGameResult() {
         FloatingZone.closeAll(); //ensure floating card areas cleared and closed after the game
         if (isNetGame()) {
             writeMatchPreferences();

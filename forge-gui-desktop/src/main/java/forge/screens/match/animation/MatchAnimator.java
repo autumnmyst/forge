@@ -10,6 +10,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import javax.swing.JComponent;
 import javax.swing.JPanel;
@@ -126,6 +128,7 @@ public final class MatchAnimator {
 
     public void dispose() {
         clock.stop();
+        soundThread.shutdownNow();
         queue.skipAll();
         departing.clear();
         arriving.clear();
@@ -159,6 +162,32 @@ public final class MatchAnimator {
         queue.enqueue(new AnimationStep(label).after(refresh));
         clock.start();
         return true;
+    }
+
+    /**
+     * Plays sound off the EDT, in order, one clip at a time.
+     * <p>
+     * Needed because {@code AudioClip.play} sleeps on whichever thread calls it when the
+     * same clip is already running, to keep a burst of identical sounds from merging.
+     * That is harmless on the game thread, which is where sound normally comes from, but
+     * would stall the display if a queued clip were played from the EDT.
+     */
+    private final ExecutorService soundThread = Executors.newSingleThreadExecutor(r -> {
+        final Thread t = new Thread(r, "Animation sound");
+        t.setDaemon(true);
+        return t;
+    });
+
+    /**
+     * Hold a sound back until the animation it belongs to is on screen.
+     *
+     * @return true if the sound was taken over, meaning the caller must not play it.
+     */
+    public boolean deferSound(final Runnable playSound) {
+        if (playSound == null) {
+            return false;
+        }
+        return defer("sound", () -> soundThread.execute(playSound));
     }
 
     // ------------------------------------------------------------------ event intake
