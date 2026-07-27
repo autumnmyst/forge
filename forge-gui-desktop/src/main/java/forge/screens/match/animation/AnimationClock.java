@@ -103,6 +103,7 @@ public final class AnimationClock {
         }
 
         // A drag has no timeline of its own but still needs a frame every tick.
+        layer.pruneFinished();
         active |= layer.hasOverlayAnims();
 
         if (active) {

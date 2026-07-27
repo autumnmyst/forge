@@ -58,6 +58,18 @@ public final class AnimationLayer extends JPanel {
         return !extra.isEmpty();
     }
 
+    /**
+     * Drop overlay animations that have finished.
+     * <p>
+     * Unlike queued steps, these are registered by hand and have no owner watching for
+     * their end, so without this an animation that completes stays in the draw list -
+     * still painting its last frame every tick and keeping the clock awake. A card that
+     * has landed or dissolved would simply sit there.
+     */
+    public synchronized void pruneFinished() {
+        extra.removeIf(Anim::isDone);
+    }
+
     @Override
     protected void paintComponent(final Graphics g) {
         final Graphics2D g2d = (Graphics2D) g.create();

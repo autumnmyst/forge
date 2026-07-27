@@ -268,6 +268,10 @@ public final class DragToPlay extends CardPanelMouseAdapter {
             return;
         }
         sourceCard = card;
+        // Claim it before the cast starts: the card leaves the hand part-way through this
+        // call, and without the claim the hand's removal hook would drop a copy into the
+        // slot it just vacated while the real one is still under the cursor.
+        animator.reserveHold(sourceCard);
         // A synthetic trigger event keeps the multi-ability popup working; if one opens,
         // that is the "needs more steps" path and the drag simply stops mattering.
         controller().selectCard(sourceCard, null, new MouseTriggerEvent(syntheticEvent()));
@@ -283,7 +287,9 @@ public final class DragToPlay extends CardPanelMouseAdapter {
         if (sourceCard == null) {
             return;
         }
+        final CardView cancelling = sourceCard;
         sourceCard = null;
+        animator.releaseHold(cancelling);
         // Retract only the mana payment this drag put up. Targeting happens before
         // payment, so by the time a targeted spell reaches the board the prompt asking
         // for something is not ours - pressing its Cancel would abort the target

@@ -210,6 +210,32 @@ public final class MatchAnimator {
 
     /** Cards whose costs are fully paid, so they have really reached the stack. */
     private final Set<Integer> castConfirmed = new HashSet<>();
+    /**
+     * Cards a live drag is carrying. The cast starts as soon as the pointer crosses onto
+     * the battlefield, so the card leaves the hand while it is still being dragged - and
+     * the hand's own removal hook would otherwise plant a second copy back in the empty
+     * slot it just left, next to the one under the cursor. The drag hands its card over
+     * at the point it is released instead.
+     */
+    private final Set<Integer> dragOwned = new HashSet<>();
+
+    /** Claim a card for a drag in progress, suppressing the automatic pick-up. */
+    public void reserveHold(final CardView card) {
+        if (card != null) {
+            synchronized (heldCards) {
+                dragOwned.add(card.getId());
+            }
+        }
+    }
+
+    /** Give up a claim without handing anything over, e.g. when a drag is cancelled. */
+    public void releaseHold(final CardView card) {
+        if (card != null) {
+            synchronized (heldCards) {
+                dragOwned.remove(card.getId());
+            }
+        }
+    }
 
     /** Pick a card up out of its hand panel and hold it for the duration of the cast. */
     private void beginHold(final CardPanel panel) {
@@ -218,8 +244,8 @@ public final class MatchAnimator {
             return;
         }
         synchronized (heldCards) {
-            if (heldCards.containsKey(card.getId())) {
-                return; // a drag already handed one over, at the point it was released
+            if (heldCards.containsKey(card.getId()) || dragOwned.contains(card.getId())) {
+                return; // a drag is carrying it, or has already handed one over
             }
         }
         final CardSnapshot snap = CardSnapshot.capture(panel, layer);
@@ -246,6 +272,7 @@ public final class MatchAnimator {
             heldCard.snapTo(at);
         }
         synchronized (heldCards) {
+            dragOwned.remove(card.getId());
             final HeldCard previous = heldCards.put(card.getId(), heldCard);
             if (previous != null) {
                 previous.finish();
@@ -258,6 +285,9 @@ public final class MatchAnimator {
         // so it goes straight there from wherever it was being held.
         if (isCastConfirmed(card.getId())) {
             heldCard.moveTo(stackAnchor(), 0.85);
+        } else {
+            // Still owed something. It waits where it is, pulsing, until the cost is met.
+            heldCard.setAwaitingPayment(true);
         }
         clock.start();
     }
@@ -278,6 +308,7 @@ public final class MatchAnimator {
         }
         final HeldCard heldCard = takeHeld(card.getId());
         if (heldCard != null) {
+            heldCard.setAwaitingPayment(false);
             heldCard.moveTo(stackAnchor(), 0.85);
             clock.start();
         }
@@ -285,7 +316,14 @@ public final class MatchAnimator {
 
     private HeldCard takeHeld(final int cardId) {
         synchronized (heldCards) {
-            return heldCards.get(cardId);
+            final HeldCard heldCard = heldCards.get(cardId);
+            if (heldCard != null && heldCard.isDone()) {
+                // Already played out; the layer has dropped it and so should this map.
+                heldCards.remove(cardId);
+                castConfirmed.remove(cardId);
+                return null;
+            }
+            return heldCard;
         }
     }
 
@@ -303,6 +341,7 @@ public final class MatchAnimator {
         }
         final HeldCard heldCard = takeHeld(card.getId());
         if (heldCard != null) {
+            heldCard.setAwaitingPayment(false);
             heldCard.beginRelease();
             clock.start();
         }
@@ -319,6 +358,7 @@ public final class MatchAnimator {
         }
         dropHeld(card.getId());
         final Point home = handAnchor(card);
+        heldCard.setAwaitingPayment(false);
         heldCard.moveTo(home, 0.7);
         heldCard.beginRelease();
         clock.start();
