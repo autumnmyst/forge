@@ -569,6 +569,12 @@ public class CardPanel extends SkinnedPanel implements CardContainer, IDisposabl
 
     @Override
     public final void doLayout() {
+        // dispose() clears the card and the image panel, but a disposed panel can still
+        // be reached by a repaint sweep before its container drops it, or by an
+        // animation that outlives the card. Laying one out dereferences both.
+        if (card == null || imagePanel == null) {
+            return;
+        }
         int borderSize = calculateBorderSize();
 
         final Point imgPos = new Point(cardXOffset + borderSize, cardYOffset + borderSize);

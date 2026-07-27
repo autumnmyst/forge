@@ -8,6 +8,7 @@ import javax.swing.SwingUtilities;
 
 import org.tinylog.Logger;
 
+import forge.card.mana.ManaCost;
 import forge.game.card.CardView;
 import forge.game.player.PlayerView;
 import forge.interfaces.IGameController;
@@ -83,6 +84,27 @@ public final class DragToPlay extends CardPanelMouseAdapter {
     /** The controller for this hand's own player; never the spectator fallback. */
     private IGameController controller() {
         return matchUI.getGameController(player);
+    }
+
+    /**
+     * Whether playing this card will put up a mana payment the player can watch.
+     * <p>
+     * Only such a card is committed early, when the pointer crosses onto the
+     * battlefield, so the payment prompt and auto-tap highlights are visible while it is
+     * still being held. Everything else waits for release.
+     * <p>
+     * A land, a zero-cost artifact or a free spell has nothing to pay, so committing it
+     * early would resolve it outright the instant the pointer entered the battlefield -
+     * the card would leave the hand mid-drag, still-held, and leave the drag operating
+     * on a panel the zone refresh has already disposed. Waiting for release also matches
+     * what the gesture means: you put the card down when you let go of it.
+     */
+    private static boolean needsPayment(final CardView card) {
+        if (card == null || card.getCurrentState() == null) {
+            return false;
+        }
+        final ManaCost cost = card.getCurrentState().getManaCost();
+        return cost != null && !cost.isNoCost() && !cost.isZero();
     }
 
     /**
@@ -164,6 +186,11 @@ public final class DragToPlay extends CardPanelMouseAdapter {
 
         final boolean overField = isOverOwnBattlefield(inLayer);
         ghost.setArmed(overField);
+        // Only a card with a cost to pay is committed here; the rest are played on
+        // release, so the ghost still shows as droppable without the card being gone.
+        if (!needsPayment(sourcePanel.getCard())) {
+            return;
+        }
         if (overField && !armed) {
             arm();
         } else if (!overField && armed) {
@@ -177,14 +204,30 @@ public final class DragToPlay extends CardPanelMouseAdapter {
         }
         final Point drop = ghost.getPosition();
         final boolean wasArmed = armed;
+        final boolean overField = ghost.isArmed();
+        final CardView held = sourcePanel == null ? null : sourcePanel.getCard();
         finishDrag();
 
-        if (!wasArmed) {
-            // Released back over the hand: undo the arming and let the drag mean what it
-            // has always meant, a reorder.
+        if (!overField) {
+            // Released back over the hand: retract anything already begun and let the
+            // drag mean what it has always meant, a reorder.
             cancelCast();
             return;
         }
+
+        if (!wasArmed) {
+            // Nothing to pay, so the play was held back until now. Start it here and let
+            // it run to completion on its own - this is the release that plays a land.
+            if (!canPlayNow(held)) {
+                return;
+            }
+            consumed = true;
+            sourceCard = held;
+            controller().selectCard(held, null, new MouseTriggerEvent(syntheticEvent(drop)));
+            animator.slideIntoPlace(held, toScreen(drop));
+            return;
+        }
+
         consumed = true;
         // The prompt only offers Auto when the whole cost is payable from untapped
         // sources. If it is not offering, the cast needs more decisions and the normal
@@ -284,8 +327,11 @@ public final class DragToPlay extends CardPanelMouseAdapter {
      * equivalent stand-in over the layer.
      */
     private MouseEvent syntheticEvent() {
-        final Point p = ghost != null ? ghost.getPosition() : new Point(0, 0);
+        return syntheticEvent(ghost != null ? ghost.getPosition() : new Point(0, 0));
+    }
+
+    private MouseEvent syntheticEvent(final Point at) {
         return new MouseEvent(animator.getLayer(), MouseEvent.MOUSE_RELEASED,
-                System.currentTimeMillis(), 0, p.x, p.y, 1, false, MouseEvent.BUTTON1);
+                System.currentTimeMillis(), 0, at.x, at.y, 1, false, MouseEvent.BUTTON1);
     }
 }
