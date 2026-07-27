@@ -174,9 +174,12 @@ public final class MatchAnimator {
         }
         try {
             if (ev instanceof GameEventCardDamaged e) {
-                recordDamage(e.source(), e.card(), null, e.amount());
+                // Read here, on the game thread as the blow lands, not at flush time.
+                recordDamage(e.source(), e.card(), null, e.amount(),
+                        e.source() != null && e.source().isAttacking());
             } else if (ev instanceof GameEventPlayerDamaged e) {
-                recordDamage(e.source(), null, e.target(), e.amount());
+                // This one states outright whether it was combat damage.
+                recordDamage(e.source(), null, e.target(), e.amount(), e.combat());
             } else if (ev instanceof GameEventCardChangeZone e) {
                 recordZoneChange(e);
             } else if (ev instanceof GameEventSpellAbilityCast e) {
@@ -447,6 +450,14 @@ public final class MatchAnimator {
         private final List<CardView> cardTargets = new ArrayList<>(4);
         private final List<PlayerView> playerTargets = new ArrayList<>(2);
         private int total;
+        /**
+         * Whether this was a blow struck in combat, captured when the damage happened.
+         * <p>
+         * It cannot be read later: a {@link CardView} is live and the game thread keeps
+         * updating it, so by the time the flush runs on the EDT combat may already have
+         * ended and the attacker no longer say it is attacking.
+         */
+        private boolean combat;
 
         DamageGroup(final CardView source) {
             this.source = source;
@@ -458,12 +469,13 @@ public final class MatchAnimator {
     }
 
     private void recordDamage(final CardView source, final CardView cardTarget,
-            final PlayerView playerTarget, final int amount) {
+            final PlayerView playerTarget, final int amount, final boolean combat) {
         if (source == null || amount <= 0) {
             return;
         }
         synchronized (pendingDamage) {
             final DamageGroup g = pendingDamage.computeIfAbsent(source.getId(), k -> new DamageGroup(source));
+            g.combat |= combat;
             if (cardTarget != null) {
                 g.cardTargets.add(cardTarget);
             }
@@ -562,7 +574,7 @@ public final class MatchAnimator {
         // from the attacker's damage, and the attacker flinches from the blocker's own
         // damage group. Lunging is for the aggressor. A burn spell must not lunge
         // either, hence the combat check rather than just testing for a creature.
-        final boolean striking = sourcePanel != null && g.source.isAttacking();
+        final boolean striking = g.combat;
 
         // A striking attacker gets one step per target so they play in sequence;
         // everything else resolves as a single step with its hits shown together.
@@ -590,18 +602,23 @@ public final class MatchAnimator {
                 }
                 // If that blocker hit back, it recoils together with the attacker rather
                 // than in a beat of its own.
-                if (striking && counterHits.getOrDefault(g.source.getId(), Set.of()).contains(cv.getId())) {
+                if (striking && sourcePanel != null
+                        && counterHits.getOrDefault(g.source.getId(), Set.of()).contains(cv.getId())) {
                     step.add(PanelAnim.flinch(sourcePanel, toPanelSpace(sourcePanel, to), 260));
                 }
             }
             if (striking) {
-                // Drawn on the overlay rather than by displacing the panel, so the
-                // attacker passes over its neighbours and can leave its own row instead
-                // of being clipped at the edge of its battlefield.
-                final CardSnapshot snap = CardSnapshot.capture(sourcePanel, layer);
-                step.add(snap != null
-                        ? OverlayFlight.lunge(sourcePanel, snap, to, LUNGE_REACH, LUNGE_MS)
-                        : PanelAnim.lunge(sourcePanel, toPanelSpace(sourcePanel, to), LUNGE_REACH, LUNGE_MS));
+                if (sourcePanel != null) {
+                    // Drawn on the overlay rather than by displacing the panel, so the
+                    // attacker passes over its neighbours and can leave its own row
+                    // instead of being clipped at the edge of its battlefield.
+                    final CardSnapshot snap = CardSnapshot.capture(sourcePanel, layer);
+                    step.add(snap != null
+                            ? OverlayFlight.lunge(sourcePanel, snap, to, LUNGE_REACH, LUNGE_MS)
+                            : PanelAnim.lunge(sourcePanel, toPanelSpace(sourcePanel, to), LUNGE_REACH, LUNGE_MS));
+                }
+                // Enqueued even with no panel to move: combat damage always reads as a
+                // strike, never as something travelling across the board.
                 queue.enqueue(step);
             }
         }
