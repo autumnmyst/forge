@@ -963,8 +963,25 @@ public final class MatchAnimator {
         if (panel.getRenderAlpha() <= 0f) {
             return;
         }
-        clock.addFree(PanelAnim.reflow(panel, dx, dy, scale, 260));
+        // Retire the previous one first. Two reflows on the same card both write its
+        // offset every frame, so they fight and the card stutters between them. The
+        // replacement already starts from where the card visually is, because the
+        // capture that produced this delta included the old animation's offset.
+        final Anim previous = runningReflows.put(panel, null);
+        if (previous != null) {
+            previous.finish();
+        }
+        final Anim reflow = PanelAnim.reflow(panel, dx, dy, scale, 260);
+        runningReflows.put(panel, reflow);
+        clock.addFree(reflow);
     }
+
+    /**
+     * The reflow currently animating each card, so a new one can replace it cleanly.
+     * <p>
+     * Weak-keyed so a card leaving the battlefield does not keep its panel alive.
+     */
+    private final Map<CardPanel, Anim> runningReflows = new java.util.WeakHashMap<>();
 
     /**
      * Where a permanent's arrival particles should start.

@@ -533,8 +533,16 @@ public class PlayArea extends CardPanelContainer implements CardPanelMouseListen
         }
         for (final CardPanel p : getCardPanels()) {
             if (p.getCard() != null && p.getCardWidth() > 0) {
-                boundsBeforeLayout.put(p.getCard().getId(),
-                        new Rectangle(p.getCardX(), p.getCardY(), p.getCardWidth(), p.getCardHeight()));
+                // Where the card *looks* like it is, not where layout last put it. A
+                // reflow already in flight is holding the card away from its laid-out
+                // position, and capturing that position instead would compute the next
+                // move from somewhere the card is not - which is the jump that made a
+                // second reflow arriving mid-animation look broken.
+                boundsBeforeLayout.put(p.getCard().getId(), new Rectangle(
+                        p.getCardX() + (int) Math.round(p.getRenderOffsetX()),
+                        p.getCardY() + (int) Math.round(p.getRenderOffsetY()),
+                        Math.max(1, (int) Math.round(p.getCardWidth() * p.getRenderScale())),
+                        p.getCardHeight()));
             }
         }
     }
