@@ -138,6 +138,16 @@ public class PlayerDetailsPanel extends JPanel {
     }
 
     /**
+     * The floating-mana readout for one colour, in {@code MagicColor.Color} order
+     * (white, blue, black, red, green, colourless).
+     *
+     * @return the label, or null if the index is outside that range.
+     */
+    public JComponent getManaLabel(final int colorIndex) {
+        return colorIndex >= 0 && colorIndex < manaLabels.size() ? manaLabels.get(colorIndex) : null;
+    }
+
+    /**
      * Handles observer update of the mana pool.
      */
     public void updateManaPool() {

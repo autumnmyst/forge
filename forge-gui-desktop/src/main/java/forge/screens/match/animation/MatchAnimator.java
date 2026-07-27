@@ -15,12 +15,15 @@ import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
 
+import forge.card.MagicColor;
 import forge.game.GameEntityView;
 import forge.game.card.CardView;
 import forge.game.combat.CombatView;
 import forge.game.event.GameEvent;
 import forge.game.event.GameEventCardChangeZone;
+import forge.game.event.EventValueChangeType;
 import forge.game.event.GameEventCardDamaged;
+import forge.game.event.GameEventManaPool;
 import forge.game.event.GameEventPlayerDamaged;
 import forge.game.event.GameEventSpellAbilityCast;
 import forge.game.event.GameEventSpellRemovedFromStack;
@@ -77,6 +80,10 @@ public final class MatchAnimator {
     private final Map<Integer, ZoneType> departing = new HashMap<>();
     /** Cards that just arrived on a battlefield, to be faded in once their panel exists. */
     private final Set<Integer> arriving = new HashSet<>();
+    /** Zone each arriving card came out of; null means it was created, i.e. a token. */
+    private final Map<Integer, ZoneType> arrivedFrom = new HashMap<>();
+    /** Positions measured before a source panel was destroyed, for lands leaving hand. */
+    private final Map<Integer, Point> arrivalOrigin = new HashMap<>();
 
     /** Damage grouped by source, flushed on the next EDT pass. See {@link #flushDamage()}. */
     private final Map<Integer, DamageGroup> pendingDamage = new LinkedHashMap<>();
@@ -122,6 +129,8 @@ public final class MatchAnimator {
         queue.skipAll();
         departing.clear();
         arriving.clear();
+        arrivedFrom.clear();
+        arrivalOrigin.clear();
         pendingDamage.clear();
         synchronized (pendingCasts) {
             pendingCasts.clear();
@@ -176,6 +185,8 @@ public final class MatchAnimator {
                 resolveCast(e);
             } else if (ev instanceof GameEventSpellRemovedFromStack e) {
                 forgetCast(e.sa());
+            } else if (ev instanceof GameEventManaPool e) {
+                recordManaAdded(e);
             }
             // Note there is no token-created case: GameEventTokenCreated carries no
             // payload at all, so tokens are recognised by CardView.isToken() when their
@@ -193,10 +204,16 @@ public final class MatchAnimator {
         final ZoneType from = e.from() == null ? null : e.from().zoneType();
         final ZoneType to = e.to() == null ? null : e.to().zoneType();
         synchronized (this) {
-            // Only the two ends of the battlefield matter: something arriving fades in,
-            // something leaving fades out. Cards are not followed between other zones.
+            // Only the two ends of the battlefield matter: something arriving gets
+            // particles run to it, something leaving fades out.
             if (to == ZoneType.Battlefield) {
                 arriving.add(card.getId());
+                arrivedFrom.put(card.getId(), from);
+                if (from == ZoneType.Hand) {
+                    // A land: its origin is the card still sitting in hand, so the hand
+                    // panel has to be measured before the zone refresh takes it away.
+                    departing.put(card.getId(), ZoneType.Battlefield);
+                }
             } else if (from == ZoneType.Battlefield) {
                 departing.put(card.getId(), to);
             }
@@ -250,9 +267,8 @@ public final class MatchAnimator {
                 }
             }
         }
-        if (rec.targetCount() == 0) {
-            return; // nothing to draw a line to
-        }
+        // Recorded even with no targets: an untargeted ability still resolves, and gets
+        // a pulse at its source rather than a line to anywhere.
         synchronized (pendingCasts) {
             pendingCasts.put(e.sa(), rec);
             // Anything countered or otherwise removed without a resolution event would
@@ -316,9 +332,105 @@ public final class MatchAnimator {
                 step.add(new BeamAnim(from, to, palette, 1f, 480));
             }
         }
-        if (!step.isEmpty()) {
-            queue.enqueue(step);
+        if (step.isEmpty()) {
+            // Nothing was targeted - an activated or triggered ability that just does its
+            // work. It still deserves to be seen happening, so pulse at its source.
+            step.add(new ImpactAnim(from, palette, 2f, 420, 0f));
+        }
+        // Remembered so a token created by this ability can be shown coming from it.
+        lastEffectOrigin = from;
+        queue.enqueue(step);
+        clock.start();
+    }
+
+    /**
+     * Where the most recent resolution happened, used as the origin for a token.
+     * <p>
+     * Tokens are created rather than moved, so they raise no change-zone event with a
+     * source, and {@code GameEventTokenCreated} carries no payload at all. Attributing
+     * one to whatever just resolved is the only handle available, and is right in the
+     * overwhelming majority of cases - a token appears because something made it.
+     */
+    private volatile Point lastEffectOrigin;
+
+    /**
+     * Show a permanent arriving: particles run from wherever it came from to the slot it
+     * will occupy, and only when they land does the card itself appear.
+     * <p>
+     * This replaces carrying the card across the board. The particles say the same thing
+     * without a second copy of the card fighting the real panel for the same space, and
+     * because it is a queued step the card genuinely waits for them to finish.
+     */
+    private void enqueueArrival(final CardPanel panel, final CardView card, final Point origin) {
+        final Point dest = centreOf(panel);
+        if (origin == null || dest == null) {
+            clock.addFree(PanelAnim.fadeIn(panel, 320));
+            return;
+        }
+        final List<Color> palette = CardColors.of(card, canShow(card));
+        queue.enqueue(new AnimationStep("arrive:" + card.getName())
+                .before(() -> {
+                    panel.setRenderAlpha(0f);
+                    panel.repaint();
+                })
+                .add(new BeamAnim(origin, dest, palette, 1f, 520))
+                .after(() -> {
+                    panel.clearRenderTransform();
+                    clock.addFree(PanelAnim.fadeIn(panel, 320));
+                }));
+        clock.start();
+    }
+
+    // ------------------------------------------------------------------ mana
+
+    /**
+     * Pulse the floating-mana readout in the colour that was just added, wherever it came
+     * from - a tapped land, a mana ability, or something resolving off the stack.
+     * <p>
+     * Runs free of the queue rather than through it: mana usually appears while the
+     * player is mid-payment, and holding the board back for it would put a pause in the
+     * middle of tapping lands.
+     */
+    private void recordManaAdded(final GameEventManaPool e) {
+        if (e.mode() != EventValueChangeType.Added || e.player() == null || e.colors() == null) {
+            return;
+        }
+        final List<MagicColor.Color> colors = new ArrayList<>(e.colors());
+        final PlayerView player = e.player();
+        FThreads.invokeInEdtLater(() -> {
+            for (final MagicColor.Color color : colors) {
+                final Point at = manaLabelCentre(player, color);
+                if (at != null) {
+                    clock.addFree(new ImpactAnim(at, List.of(manaColor(color)), 1f, 380, 0f));
+                }
+            }
             clock.start();
+        });
+    }
+
+    /** Centre of a player's readout for one mana colour, in overlay coordinates. */
+    private Point manaLabelCentre(final PlayerView player, final MagicColor.Color color) {
+        final VField field = fieldFor(player);
+        if (field == null) {
+            return null;
+        }
+        final JComponent label = field.getDetailsPanel().getManaLabel(color.ordinal());
+        if (label == null || !label.isShowing() || !layer.isShowing()) {
+            return null;
+        }
+        return SwingUtilities.convertPoint(label.getParent(),
+                label.getX() + label.getWidth() / 2, label.getY() + label.getHeight() / 2, layer);
+    }
+
+    /** The spark colour for a mana colour, matching how cards of it are tinted. */
+    private static Color manaColor(final MagicColor.Color color) {
+        switch (color) {
+            case WHITE: return new Color(254, 253, 244);
+            case BLUE: return new Color(90, 146, 202);
+            case BLACK: return new Color(140, 130, 140);
+            case RED: return new Color(253, 66, 40);
+            case GREEN: return new Color(22, 115, 69);
+            default: return new Color(160, 166, 164);
         }
     }
 
@@ -598,10 +710,19 @@ public final class MatchAnimator {
             // Not a tracked departure - a re-layout or a match teardown, not a death.
             return;
         }
-        if (to == ZoneType.Stack || to == ZoneType.Battlefield) {
-            // Going somewhere it will reappear under its own name; nothing to play out
-            // here. Cards are not carried between zones - they simply fade in on arrival.
+        if (to == ZoneType.Battlefield) {
+            // A land on its way to the table. This is the last moment its hand slot can
+            // be measured, and that slot is where its particles will start from.
+            final Point at = centreOf(panel);
+            if (at != null) {
+                synchronized (this) {
+                    arrivalOrigin.put(panel.getCard().getId(), at);
+                }
+            }
             return;
+        }
+        if (to == ZoneType.Stack) {
+            return; // beginning a cast, not leaving the board
         }
         final CardSnapshot snap = CardSnapshot.capture(panel, layer);
         if (snap == null) {
@@ -625,14 +746,39 @@ public final class MatchAnimator {
             if (card == null) {
                 continue;
             }
+            final ZoneType from;
+            final Point captured;
+            final boolean expected;
             synchronized (this) {
-                arriving.remove(card.getId());
+                expected = arriving.remove(card.getId());
+                from = arrivedFrom.remove(card.getId());
+                captured = arrivalOrigin.remove(card.getId());
             }
-            // Every permanent fades in, whatever it came from. A token has no prior zone
-            // at all, and for everything else the fade reads well enough that carrying
-            // the card across the board is not worth the trouble it causes.
-            clock.addFree(PanelAnim.fadeIn(panel, 320));
+            if (!expected) {
+                // Not a tracked arrival - a re-layout, or the board being rebuilt.
+                continue;
+            }
+            enqueueArrival(panel, card, originFor(from, captured));
         }
+    }
+
+    /**
+     * Where a permanent's arrival particles should start.
+     *
+     * @param from     the zone it came out of, or null if it was created rather than moved.
+     * @param captured a position measured before the source panel was destroyed.
+     */
+    private Point originFor(final ZoneType from, final Point captured) {
+        if (captured != null) {
+            return captured; // a land, measured in its hand slot
+        }
+        if (from == null) {
+            // Created, not moved: a token. It comes from whatever just resolved.
+            return lastEffectOrigin != null ? lastEffectOrigin : stackAnchor();
+        }
+        // Resolved off the stack, or returned from a graveyard or exile - all of which
+        // pass through the stack on the way to the battlefield.
+        return stackAnchor();
     }
 
     // ------------------------------------------------------------------ geometry
