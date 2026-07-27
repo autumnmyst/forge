@@ -67,12 +67,25 @@ public final class CardSnapshot {
         try {
             final BufferedImage img = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
             final Graphics2D g = img.createGraphics();
+            // Copy the card as it really looks, not as an animation is currently posing
+            // it. paint() refuses to draw a panel an animation has faded out, and would
+            // otherwise bake in that animation's offset and scale as well - so a card
+            // being re-captured mid-move came out blank or wrongly placed, and a tapped
+            // one could be copied before its rotation had been applied.
+            final double offX = panel.getRenderOffsetX();
+            final double offY = panel.getRenderOffsetY();
+            final double scale = panel.getRenderScale();
+            final float alpha = panel.getRenderAlpha();
+            panel.clearRenderTransform();
             try {
                 // paint() rather than print(): the panel's own paint applies the tap
-                // rotation and highlight frames, which should travel with the ghost.
+                // rotation and highlight frames, which should travel with the copy.
                 panel.paint(g);
             } finally {
                 g.dispose();
+                panel.setRenderOffset(offX, offY);
+                panel.setRenderScale(scale);
+                panel.setRenderAlpha(alpha);
             }
             final Point at = SwingUtilities.convertPoint(panel.getParent(),
                     panel.getX(), panel.getY(), reference);

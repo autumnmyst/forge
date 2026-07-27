@@ -132,6 +132,7 @@ public final class MatchAnimator {
         arriving.clear();
         arrivedFrom.clear();
         awaitingOrigin.clear();
+        arrivalSteps.clear();
         pendingDamage.clear();
         synchronized (pendingCasts) {
             pendingCasts.clear();
@@ -250,6 +251,15 @@ public final class MatchAnimator {
             if (to == ZoneType.Battlefield) {
                 arriving.add(card.getId());
                 arrivedFrom.put(card.getId(), from);
+                // Claim the slot now, on the game thread. A permanent's own
+                // enters-the-battlefield trigger goes on the stack immediately after
+                // this, and its cast animation would otherwise be queued first and play
+                // before the creature it belongs to had appeared.
+                final AnimationStep reserved =
+                        new AnimationStep("arrive:" + card.getName()).reserved();
+                arrivalSteps.put(card.getId(), reserved);
+                queue.enqueue(reserved);
+                clock.start();
                 // The panel may already exist - see awaitZoneChange. Settle it on the EDT,
                 // which is where panels may be touched.
                 FThreads.invokeInEdtLater(() -> claimAwaitingPanel(card, from));
@@ -499,6 +509,8 @@ public final class MatchAnimator {
      */
     /** Panels built before their zone change arrived, waiting to learn where they came from. */
     private final Map<Integer, CardPanel> awaitingOrigin = new HashMap<>();
+    /** Queue slots claimed for arrivals, keyed by card, filled once the panel exists. */
+    private final Map<Integer, AnimationStep> arrivalSteps = new HashMap<>();
 
     /**
      * Hold a newly built panel until its zone change turns up.
@@ -571,19 +583,32 @@ public final class MatchAnimator {
         panel.setRenderAlpha(0f);
         panel.repaint();
 
-        // Always a queued step, even with nowhere to draw a beam from. The reveal has to
-        // be the step's own ending or a card can be left hidden: the panel was blanked
-        // above, and only this puts it back.
+        // Fill the slot claimed when the zone change was announced, so this plays before
+        // anything queued since - notably the card's own enters-the-battlefield trigger
+        // going on the stack. Falls back to a fresh step for an arrival nobody reserved.
+        final AnimationStep reserved;
+        synchronized (this) {
+            reserved = arrivalSteps.remove(card.getId());
+        }
+        final AnimationStep step = reserved != null
+                ? reserved
+                : new AnimationStep("arrive:" + card.getName());
+
+        // The reveal has to be the step's own ending or a card can be left hidden: the
+        // panel was blanked above, and only this puts it back.
+        step.after(() -> {
+            panel.clearRenderTransform();
+            clock.addFree(PanelAnim.fadeIn(panel, 320));
+        });
         final Point dest = centreOf(panel);
-        final AnimationStep step = new AnimationStep("arrive:" + card.getName())
-                .after(() -> {
-                    panel.clearRenderTransform();
-                    clock.addFree(PanelAnim.fadeIn(panel, 320));
-                });
         if (origin != null && dest != null) {
             step.add(new BeamAnim(origin, dest, CardColors.of(card, canShow(card)), 1f, 520));
         }
-        queue.enqueue(step);
+        if (reserved != null) {
+            reserved.seal();
+        } else {
+            queue.enqueue(step);
+        }
         clock.start();
     }
 

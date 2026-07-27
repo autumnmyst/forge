@@ -1036,7 +1036,13 @@ public final class CMatchUI
 
     @Override
     public void updateStack() {
-        FThreads.invokeInEdtNowOrLater(() -> getCStack().update());
+        // Kept in step with everything else: a spell should appear on the stack as its
+        // cast animation arrives there, not the instant the game thread put it there.
+        FThreads.invokeInEdtNowOrLater(() -> {
+            if (!animator.defer("stack", () -> getCStack().update())) {
+                getCStack().update();
+            }
+        });
     }
 
     /**
