@@ -131,6 +131,7 @@ public final class MatchAnimator {
         departing.clear();
         arriving.clear();
         arrivedFrom.clear();
+        awaitingOrigin.clear();
         pendingDamage.clear();
         synchronized (pendingCasts) {
             pendingCasts.clear();
@@ -242,6 +243,9 @@ public final class MatchAnimator {
             if (to == ZoneType.Battlefield) {
                 arriving.add(card.getId());
                 arrivedFrom.put(card.getId(), from);
+                // The panel may already exist - see awaitZoneChange. Settle it on the EDT,
+                // which is where panels may be touched.
+                FThreads.invokeInEdtLater(() -> claimAwaitingPanel(card, from));
                 if (from == ZoneType.Hand) {
                     // A land: its origin is the card still sitting in hand, so the hand
                     // panel has to be measured before the zone refresh takes it away.
@@ -457,6 +461,54 @@ public final class MatchAnimator {
      * without a second copy of the card fighting the real panel for the same space, and
      * because it is a queued step the card genuinely waits for them to finish.
      */
+    /** Panels built before their zone change arrived, waiting to learn where they came from. */
+    private final Map<Integer, CardPanel> awaitingOrigin = new HashMap<>();
+
+    /**
+     * Hold a newly built panel until its zone change turns up.
+     * <p>
+     * Blanked straight away so it cannot flash before its animation, and released by a
+     * safety timer if the event never comes - a card must never be left invisible
+     * because of a missing animation.
+     */
+    private void awaitZoneChange(final int cardId, final CardPanel panel) {
+        panel.setRenderAlpha(0f);
+        panel.repaint();
+        synchronized (this) {
+            awaitingOrigin.put(cardId, panel);
+        }
+        clock.addFree(new Anim(400) {
+            @Override
+            protected void update(final float t) {
+            }
+
+            @Override
+            protected void onEnd() {
+                final CardPanel stranded;
+                synchronized (MatchAnimator.this) {
+                    stranded = awaitingOrigin.remove(cardId);
+                }
+                if (stranded != null) {
+                    stranded.clearRenderTransform();
+                    stranded.repaint();
+                }
+            }
+        });
+    }
+
+    /** The zone change caught up with a panel already built; animate it now. */
+    private void claimAwaitingPanel(final CardView card, final ZoneType from) {
+        final CardPanel panel;
+        synchronized (this) {
+            panel = awaitingOrigin.remove(card.getId());
+            arriving.remove(card.getId());
+            arrivedFrom.remove(card.getId());
+        }
+        if (panel != null && panel.getCard() != null) {
+            enqueueArrival(panel, card, originFor(from, card));
+        }
+    }
+
     /** Set true to trace why a card entering play did or did not get an arrival beam. */
     private static final boolean TRACE_ARRIVALS = true;
 
@@ -698,6 +750,11 @@ public final class MatchAnimator {
                 // Nothing moves, so the effect has to travel on its own.
                 step.add(new BeamAnim(from, to, palette, g.total, 460));
             }
+            if (target instanceof PlayerView pv) {
+                // A damaged player reacts too. Every player an effect hits gets one, so
+                // something that burns all opponents visibly rocks each of them.
+                step.add(playerFlinch(pv, palette));
+            }
             if (target instanceof CardView cv) {
                 final CardPanel tp = findPanel(cv);
                 if (tp != null && from != null) {
@@ -811,6 +868,11 @@ public final class MatchAnimator {
                 step.add(PanelAnim.flinch(tp, toPanelSpace(tp, origin), 300));
             }
         }
+        // And every player it burned, so an effect aimed at the whole table visibly
+        // rocks each of them rather than only sweeping their boards.
+        for (final PlayerView p : g.playerTargets) {
+            step.add(playerFlinch(p, palette));
+        }
         if (!step.isEmpty()) {
             queue.enqueue(step);
             clock.start();
@@ -872,11 +934,16 @@ public final class MatchAnimator {
                 System.out.println("[anim] panelAdded " + card.getName()
                         + " expected=" + expected + " from=" + from + " token=" + card.isToken());
             }
-            if (!expected) {
-                // Not a tracked arrival - a re-layout, or the board being rebuilt.
-                continue;
+            if (expected) {
+                enqueueArrival(panel, card, originFor(from, card));
+            } else {
+                // The zone change has not reached us yet. It cannot simply be waited for
+                // in order, because which of the two arrives first is a race: the card is
+                // put in its new zone before the event announcing it is fired, so a
+                // refresh already queued on the EDT can build the panel first. Park the
+                // panel and let whichever side finishes second start the animation.
+                awaitZoneChange(card.getId(), panel);
             }
-            enqueueArrival(panel, card, originFor(from, card));
         }
     }
 
@@ -980,6 +1047,20 @@ public final class MatchAnimator {
         }
         return SwingUtilities.convertPoint(parent,
                 panel.getX() + panel.getWidth() / 2, panel.getY() + panel.getHeight() / 2, layer);
+    }
+
+    /**
+     * A struck reaction over a player's avatar, or null if it is not on screen.
+     *
+     * @param palette the damaging card's colours, so the wash matches the effect.
+     */
+    private Anim playerFlinch(final PlayerView player, final List<Color> palette) {
+        final VField field = fieldFor(player);
+        final Rectangle area = field == null ? null : boundsInLayer(field.getAvatarArea());
+        if (area == null || area.width <= 0) {
+            return null;
+        }
+        return new RegionFlinch(area, palette.isEmpty() ? Color.RED : palette.get(0), 420);
     }
 
     /** Centre of a player's avatar, the endpoint used for damage dealt to a player. */
