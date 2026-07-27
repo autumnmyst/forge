@@ -232,6 +232,10 @@ public final class MatchAnimator {
         }
         final ZoneType from = e.from() == null ? null : e.from().zoneType();
         final ZoneType to = e.to() == null ? null : e.to().zoneType();
+        if (TRACE_ARRIVALS) {
+            System.out.println("[anim] zoneChange " + card.getName() + " id=" + card.getId()
+                    + " " + from + " -> " + to);
+        }
         synchronized (this) {
             // Only the two ends of the battlefield matter: something arriving gets
             // particles run to it, something leaving fades out.
@@ -453,7 +457,18 @@ public final class MatchAnimator {
      * without a second copy of the card fighting the real panel for the same space, and
      * because it is a queued step the card genuinely waits for them to finish.
      */
+    /** Set true to trace why a card entering play did or did not get an arrival beam. */
+    private static final boolean TRACE_ARRIVALS = true;
+
     private void enqueueArrival(final CardPanel panel, final CardView card, final Point origin) {
+        if (TRACE_ARRIVALS) {
+            System.out.println("[anim] arrival " + card.getName()
+                    + " origin=" + origin + " dest=" + centreOf(panel)
+                    + " parentShowing=" + (panel.getParent() != null && panel.getParent().isShowing())
+                    + " layerShowing=" + layer.isShowing()
+                    + " bounds=" + panel.getX() + "," + panel.getY()
+                    + " " + panel.getWidth() + "x" + panel.getHeight());
+        }
         // Hidden here and now, not when the step reaches the front of the queue. The
         // panel is made visible by the zone refresh on a later EDT pass, so anything
         // later than this lets a frame or two of the card through - it appeared, vanished
@@ -852,6 +867,10 @@ public final class MatchAnimator {
             synchronized (this) {
                 expected = arriving.remove(card.getId());
                 from = arrivedFrom.remove(card.getId());
+            }
+            if (TRACE_ARRIVALS) {
+                System.out.println("[anim] panelAdded " + card.getName()
+                        + " expected=" + expected + " from=" + from + " token=" + card.isToken());
             }
             if (!expected) {
                 // Not a tracked arrival - a re-layout, or the board being rebuilt.
