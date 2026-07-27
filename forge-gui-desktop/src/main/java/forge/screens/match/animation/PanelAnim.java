@@ -69,6 +69,41 @@ public final class PanelAnim {
     }
 
     /**
+     * Ease a card from where it used to be onto where layout has just put it.
+     * <p>
+     * Battlefield layout is recomputed wholesale whenever a permanent enters or leaves -
+     * cards shift along their row and the whole row can be resized to fit. Applied
+     * directly that is a jump. Driven through the render transform the card appears to
+     * slide and resize into its new place, while layout keeps owning the real bounds.
+     *
+     * @param fromDx     old position minus new, in pixels.
+     * @param fromScale  old width divided by new; 1 when only the position moved.
+     */
+    public static Anim reflow(final CardPanel panel, final int fromDx, final int fromDy,
+            final double fromScale, final long durationMs) {
+        return new Base(panel, durationMs) {
+            @Override
+            protected void onStart() {
+                if (panel != null) {
+                    panel.setRenderOffset(fromDx, fromDy);
+                    panel.setRenderScale(fromScale);
+                }
+            }
+
+            @Override
+            protected void update(final float t) {
+                if (panel == null) {
+                    return;
+                }
+                final float e = 1f - Ease.inOut(t);
+                panel.setRenderOffset(fromDx * e, fromDy * e);
+                panel.setRenderScale(Ease.lerp((float) fromScale, 1f, Ease.inOut(t)));
+                touch();
+            }
+        };
+    }
+
+    /**
      * Throw a card toward a point and let it fall back - one attacker striking one
      * target. A double strike plays this twice because the game deals damage twice; a
      * trampler plays it once per thing it damaged.

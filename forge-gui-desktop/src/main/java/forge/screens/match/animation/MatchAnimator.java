@@ -309,10 +309,14 @@ public final class MatchAnimator {
         // desktop client renders as text rather than cards. Its beams therefore start
         // from wherever the card is being carried, falling back to the stack itself.
         // Requiring a panel here is why targeted spells drew nothing at all.
-        Point from = centreOf(rec.source);
-        if (from == null) {
-            from = stackAnchor();
-        }
+        // A source that is itself on the board - a permanent using an activated ability,
+        // or a trigger firing - is a far better origin than the stack. Only a card that
+        // is on the stack has nowhere else to come from.
+        final Point onBoard = centreOf(rec.source);
+        final Point from = onBoard != null ? onBoard : stackAnchor();
+        // Remembered for anything this resolution puts onto the battlefield. Null when
+        // the source was on the stack, which is the signal to fall back to the stack.
+        lastEffectOrigin = onBoard;
         final List<Color> palette = CardColors.of(rec.source, canShow(rec.source));
         final AnimationStep step = new AnimationStep("resolve:" + rec.source.getName());
 
@@ -337,8 +341,6 @@ public final class MatchAnimator {
             // work. It still deserves to be seen happening, so pulse at its source.
             step.add(new ImpactAnim(from, palette, 2f, 420, 0f));
         }
-        // Remembered so a token created by this ability can be shown coming from it.
-        lastEffectOrigin = from;
         queue.enqueue(step);
         clock.start();
     }
@@ -362,6 +364,13 @@ public final class MatchAnimator {
      * because it is a queued step the card genuinely waits for them to finish.
      */
     private void enqueueArrival(final CardPanel panel, final CardView card, final Point origin) {
+        // Hidden here and now, not when the step reaches the front of the queue. The
+        // panel is made visible by the zone refresh on a later EDT pass, so anything
+        // later than this lets a frame or two of the card through - it appeared, vanished
+        // again, then animated.
+        panel.setRenderAlpha(0f);
+        panel.repaint();
+
         final Point dest = centreOf(panel);
         if (origin == null || dest == null) {
             clock.addFree(PanelAnim.fadeIn(panel, 320));
@@ -369,10 +378,6 @@ public final class MatchAnimator {
         }
         final List<Color> palette = CardColors.of(card, canShow(card));
         queue.enqueue(new AnimationStep("arrive:" + card.getName())
-                .before(() -> {
-                    panel.setRenderAlpha(0f);
-                    panel.repaint();
-                })
                 .add(new BeamAnim(origin, dest, palette, 1f, 520))
                 .after(() -> {
                     panel.clearRenderTransform();
@@ -763,6 +768,25 @@ public final class MatchAnimator {
     }
 
     /**
+     * Slide a card that layout has just repositioned from where it used to be.
+     * <p>
+     * Runs free of the queue: a reflow accompanies whatever caused it, so making it wait
+     * its turn would show the board rearranging itself well after the card that displaced
+     * everything had already settled.
+     */
+    public void reflow(final CardPanel panel, final int dx, final int dy, final double scale) {
+        if (panel == null || !isEnabled()) {
+            return;
+        }
+        // A card being hidden for its own arrival must not be dragged into a reflow; it
+        // is already where it belongs and is only waiting for its particles.
+        if (panel.getRenderAlpha() <= 0f) {
+            return;
+        }
+        clock.addFree(PanelAnim.reflow(panel, dx, dy, scale, 260));
+    }
+
+    /**
      * Where a permanent's arrival particles should start.
      *
      * @param from     the zone it came out of, or null if it was created rather than moved.
@@ -770,14 +794,14 @@ public final class MatchAnimator {
      */
     private Point originFor(final ZoneType from, final Point captured) {
         if (captured != null) {
-            return captured; // a land, measured in its hand slot
+            return captured; // measured where it actually sat, e.g. a land in hand
         }
-        if (from == null) {
-            // Created, not moved: a token. It comes from whatever just resolved.
-            return lastEffectOrigin != null ? lastEffectOrigin : stackAnchor();
+        if (lastEffectOrigin != null) {
+            // Whatever just resolved was a card on the board - a permanent activating an
+            // ability, or a trigger. Its own card is the honest origin.
+            return lastEffectOrigin;
         }
-        // Resolved off the stack, or returned from a graveyard or exile - all of which
-        // pass through the stack on the way to the battlefield.
+        // Nothing else to come from: it resolved off the stack.
         return stackAnchor();
     }
 
