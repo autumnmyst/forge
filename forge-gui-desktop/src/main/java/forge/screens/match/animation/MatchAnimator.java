@@ -126,6 +126,13 @@ public final class MatchAnimator {
         synchronized (pendingCasts) {
             pendingCasts.clear();
         }
+        synchronized (heldCards) {
+            for (final HeldCard h : heldCards.values()) {
+                h.finish();
+                layer.removeOverlayAnim(h);
+            }
+            heldCards.clear();
+        }
     }
 
     // ------------------------------------------------------------------ event intake
@@ -169,12 +176,95 @@ public final class MatchAnimator {
         final ZoneType from = e.from() == null ? null : e.from().zoneType();
         final ZoneType to = e.to() == null ? null : e.to().zoneType();
         synchronized (this) {
-            if (from == ZoneType.Battlefield && to != ZoneType.Battlefield) {
+            if (to == ZoneType.Stack) {
+                // Leaving for the stack is the start of a cast, not a disappearance: the
+                // card is picked up and held until the cast is decided.
+                departing.put(card.getId(), ZoneType.Stack);
+            } else if (from == ZoneType.Battlefield && to != ZoneType.Battlefield) {
                 departing.put(card.getId(), to);
             } else if (to == ZoneType.Battlefield) {
                 arriving.add(card.getId());
             }
         }
+    }
+
+    // ------------------------------------------------------------------ cards in flight
+
+    /** Cards currently being cast, drawn in flight from hand to stack to wherever they land. */
+    private final Map<Integer, HeldCard> heldCards = new HashMap<>();
+
+    /** Where a casting card comes to rest: the top of the stack panel. */
+    private Point stackAnchor() {
+        try {
+            final JComponent cell = matchUI.getCStack().getView().getParentCell();
+            final Rectangle bounds = boundsInLayer(cell);
+            if (bounds != null && bounds.width > 0) {
+                return new Point(bounds.x + bounds.width / 2, bounds.y + Math.min(90, bounds.height / 2));
+            }
+        } catch (final RuntimeException e) {
+            // The stack panel may not be laid out yet; fall through to the default.
+        }
+        return new Point(layer.getWidth() / 2, layer.getHeight() / 3);
+    }
+
+    /** Pick a card up out of its hand panel and hold it for the duration of the cast. */
+    private void beginHold(final CardPanel panel) {
+        final CardView card = panel.getCard();
+        final CardSnapshot snap = CardSnapshot.capture(panel, layer);
+        if (snap == null) {
+            return;
+        }
+        final HeldCard heldCard = new HeldCard(snap, CardColors.of(card, canShow(card)));
+        synchronized (heldCards) {
+            final HeldCard previous = heldCards.put(card.getId(), heldCard);
+            if (previous != null) {
+                previous.finish();
+                layer.removeOverlayAnim(previous);
+            }
+        }
+        layer.addOverlayAnim(heldCard);
+        heldCard.moveTo(stackAnchor(), 0.85);
+        clock.start();
+    }
+
+    private HeldCard takeHeld(final int cardId) {
+        synchronized (heldCards) {
+            return heldCards.get(cardId);
+        }
+    }
+
+    private void dropHeld(final int cardId) {
+        synchronized (heldCards) {
+            heldCards.remove(cardId);
+        }
+    }
+
+    /** Let go of a resolved cast; it lands if a permanent appears, dissolves otherwise. */
+    private void releaseHeld(final CardView card) {
+        if (card == null) {
+            return;
+        }
+        final HeldCard heldCard = takeHeld(card.getId());
+        if (heldCard != null) {
+            heldCard.beginRelease();
+            clock.start();
+        }
+    }
+
+    /** Send a cancelled or countered cast back where it came from. */
+    private void returnHeld(final CardView card) {
+        if (card == null) {
+            return;
+        }
+        final HeldCard heldCard = takeHeld(card.getId());
+        if (heldCard == null) {
+            return;
+        }
+        dropHeld(card.getId());
+        final Point home = handAnchor(card);
+        heldCard.moveTo(home, 0.7);
+        heldCard.beginRelease();
+        clock.start();
     }
 
     // ------------------------------------------------------------------ spell resolution
@@ -247,6 +337,10 @@ public final class MatchAnimator {
         synchronized (pendingCasts) {
             pendingCasts.remove(sa);
         }
+        // Countered, or the player backed out: the card is going somewhere other than
+        // resolution, so send the held copy home rather than landing it anywhere.
+        final CardView host = sa.getHostCard();
+        FThreads.invokeInEdtLater(() -> returnHeld(host));
     }
 
     /** Draw the spell reaching its targets, at the moment it actually resolves. */
@@ -255,6 +349,9 @@ public final class MatchAnimator {
         synchronized (pendingCasts) {
             rec = pendingCasts.remove(e.spell());
         }
+        final CardView host = e.spell() == null ? null : e.spell().getHostCard();
+        // Let go of the card either way: a fizzled spell still leaves the stack.
+        FThreads.invokeInEdtLater(() -> releaseHeld(host));
         if (rec == null || e.hasFizzled()) {
             // A fizzled spell never reached anything, so showing it connect would lie.
             return;
@@ -562,6 +659,12 @@ public final class MatchAnimator {
             // Not a tracked departure - a re-layout or a match teardown, not a death.
             return;
         }
+        if (to == ZoneType.Stack) {
+            // A cast beginning: hold the card rather than fading it away, so it stays
+            // visible for as long as the game is still asking questions about it.
+            beginHold(panel);
+            return;
+        }
         final CardSnapshot snap = CardSnapshot.capture(panel, layer);
         if (snap == null) {
             return;
@@ -589,6 +692,18 @@ public final class MatchAnimator {
             final boolean expected;
             synchronized (this) {
                 expected = arriving.remove(card.getId());
+            }
+            // A card that was held through its cast lands on its new panel instead of
+            // the panel fading in underneath it - otherwise the same card is drawn twice.
+            final HeldCard heldCard = takeHeld(card.getId());
+            if (heldCard != null && !heldCard.isFinishing()) {
+                dropHeld(card.getId());
+                final Point centre = centreOf(panel);
+                if (centre != null) {
+                    heldCard.landOn(panel, centre);
+                    clock.start();
+                    continue;
+                }
             }
             // Tokens have no prior zone to leave, so they never raise a change-zone
             // event; treat their first appearance as an arrival too.

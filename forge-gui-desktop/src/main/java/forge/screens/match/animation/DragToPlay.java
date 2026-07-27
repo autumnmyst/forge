@@ -239,10 +239,10 @@ public final class DragToPlay extends CardPanelMouseAdapter {
         // prompts take over from here.
         final IGameController controller = controller();
         if (controller != null && matchUI.isAutoPayOffered()) {
+            // No slide from here: a card that goes through the stack is already being
+            // carried by the animator from the moment it left the hand, and it lands
+            // itself once it resolves.
             controller.selectButtonOk();
-            if (sourceCard != null) {
-                animator.slideIntoPlace(sourceCard, toScreen(drop));
-            }
         }
     }
 

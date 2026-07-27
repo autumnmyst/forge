@@ -1185,8 +1185,13 @@ public class CardPanel extends SkinnedPanel implements CardContainer, IDisposabl
         attachedToPanel = null;
         attachedPanels = null;
         stack = null;
-        imagePanel.setImage(null);
-        imagePanel = null;
+        // Disposing twice is legitimate: a panel removed from its container can still be
+        // in a stale list that setCardPanels() later sweeps, and the second pass must not
+        // fail on the image panel this one already dropped.
+        if (imagePanel != null) {
+            imagePanel.setImage(null);
+            imagePanel = null;
+        }
         card = null;
     }
 
