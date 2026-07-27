@@ -987,7 +987,13 @@ public final class MatchAnimator {
         if (previous != null) {
             previous.finish();
         }
-        final Anim reflow = PanelAnim.reflow(panel, dx, dy, scale, 260);
+        // Drawn on the overlay so the card is not clipped to its new bounds while it is
+        // still travelling and resizing into them. The panel transform is kept only as a
+        // fallback for when the card cannot be copied.
+        final CardSnapshot snap = CardSnapshot.capture(panel, layer);
+        final Anim reflow = snap != null
+                ? OverlayFlight.reflow(panel, snap, dx, dy, scale, 260)
+                : PanelAnim.reflow(panel, dx, dy, scale, 260);
         runningReflows.put(panel, reflow);
         clock.addFree(reflow);
     }

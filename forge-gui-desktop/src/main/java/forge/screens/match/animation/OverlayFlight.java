@@ -28,6 +28,7 @@ public final class OverlayFlight extends Anim {
     private final int dx, dy;
     private final float outFraction;
     private final boolean returns;
+    private double fromScale = 1;
 
     private double x, y;
     private double scale = 1;
@@ -46,6 +47,24 @@ public final class OverlayFlight extends Anim {
                 Math.round((toward.x - from.x) * reach),
                 Math.round((toward.y - from.y) * reach),
                 0.35f, true, durationMs);
+    }
+
+    /**
+     * Slide and resize a card from where it used to be onto where layout has just put it.
+     * <p>
+     * Drawn on the overlay rather than through the panel's own render transform, because
+     * Swing clips a component to its bounds - and those bounds are already the new,
+     * often smaller, rectangle. Transforming in place therefore shows the card cropped
+     * into its destination box and moving inside it, instead of the whole card
+     * travelling and shrinking.
+     *
+     * @param fromScale the card's old width over its new one; above 1 when it shrank.
+     */
+    public static OverlayFlight reflow(final CardPanel panel, final CardSnapshot snap,
+            final int dx, final int dy, final double fromScale, final long durationMs) {
+        final OverlayFlight f = new OverlayFlight(panel, snap, dx, dy, 1f, false, durationMs);
+        f.fromScale = fromScale;
+        return f;
     }
 
     private OverlayFlight(final CardPanel panel, final CardSnapshot snap, final int dx, final int dy,
@@ -79,9 +98,10 @@ public final class OverlayFlight extends Anim {
                     : 1f - Ease.inOut((t - outFraction) / (1f - outFraction));
             scale = 1 + 0.06f * e;
         } else {
-            // Arriving: start displaced and settle onto the panel's real position.
+            // Settling: start displaced and resized, and ease onto the panel's real
+            // position and size.
             e = 1f - Ease.inOut(t);
-            scale = Ease.lerp(0.92f, 1f, Ease.inOut(t));
+            scale = Ease.lerp((float) fromScale, 1f, Ease.inOut(t));
         }
         x = start.x + dx * e;
         y = start.y + dy * e;
