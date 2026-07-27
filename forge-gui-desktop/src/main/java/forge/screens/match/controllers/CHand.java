@@ -38,7 +38,6 @@ import forge.gui.framework.ICDoc;
 import forge.localinstance.properties.ForgePreferences.FPref;
 import forge.model.FModel;
 import forge.screens.match.CMatchUI;
-import forge.screens.match.animation.DragToPlay;
 import forge.screens.match.views.VField;
 import forge.screens.match.views.VHand;
 import forge.view.arcane.CardPanel;
@@ -54,7 +53,6 @@ public class CHand implements ICDoc {
     private final PlayerView player;
     private final VHand view;
     private final List<CardView> ordering = Lists.newArrayList();
-    private final DragToPlay dragToPlay;
 
     /**
      * Controls Swing components of a player's hand instance.
@@ -63,17 +61,9 @@ public class CHand implements ICDoc {
         this.matchUI = matchUI;
         this.player = p0;
         this.view = v0;
-        // Registered first so it sees the drag before the reorder handler below and can
-        // claim it: a card pulled onto the battlefield is a cast, not a rearrangement.
-        this.dragToPlay = new DragToPlay(matchUI, p0, matchUI.getAnimator());
-        v0.getHandArea().addCardPanelMouseListener(dragToPlay);
-
         v0.getHandArea().addCardPanelMouseListener(new CardPanelMouseAdapter() {
             @Override
             public void mouseDragEnd(final CardPanel dragPanel, final MouseEvent evt) {
-                if (dragToPlay.consumedLastDrag()) {
-                    return; // the card was played out of the hand; there is no slot to reorder
-                }
                 final int index = CHand.this.view.getHandArea().getCardPanels().indexOf(dragPanel);
                 synchronized (ordering) {
                     ordering.remove(dragPanel.getCard());

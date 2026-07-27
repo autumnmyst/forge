@@ -101,7 +101,6 @@ public class ForgePreferences extends AbstractPreferences<ForgePreferences.FPref
         UI_ENABLE_ANIMATIONS ("true"),
         /** Playback rate as a percentage; 100 is the designed pace, higher is faster. */
         UI_ANIMATION_SPEED ("100"),
-        UI_DRAG_CARDS_TO_PLAY ("true"),
         UI_SHOW_LINKED_EXILE_CARDS ("true"),
         UI_LARGE_CARD_VIEWERS ("false"),
         UI_RANDOM_ART_IN_POOLS ("true"),

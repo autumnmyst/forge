@@ -179,8 +179,13 @@ public final class MatchAnimator {
         synchronized (this) {
             if (to == ZoneType.Stack) {
                 // Leaving for the stack is the start of a cast, not a disappearance: the
-                // card is picked up and held until the cast is decided.
+                // card is picked up and carried until the cast is decided.
                 departing.put(card.getId(), ZoneType.Stack);
+            } else if (from == ZoneType.Hand && to == ZoneType.Battlefield) {
+                // A land, which never touches the stack. Carried straight across so it
+                // flies from the hand to its slot rather than blinking between the two.
+                departing.put(card.getId(), ZoneType.Battlefield);
+                arriving.add(card.getId());
             } else if (from == ZoneType.Battlefield && to != ZoneType.Battlefield) {
                 departing.put(card.getId(), to);
             } else if (to == ZoneType.Battlefield) {
@@ -194,85 +199,66 @@ public final class MatchAnimator {
     /** Cards currently being cast, drawn in flight from hand to stack to wherever they land. */
     private final Map<Integer, HeldCard> heldCards = new HashMap<>();
 
-    /** Where a casting card comes to rest: the top of the stack panel. */
+    /** Where a casting card comes to rest once it is on the stack: the stack panel. */
     private Point stackAnchor() {
+        final Point p = anchorOf(matchUI.getCStack().getView().getParentCell());
+        return p != null ? p : new Point(layer.getWidth() / 2, layer.getHeight() / 3);
+    }
+
+    /**
+     * Where a card waits while its costs are being settled: the prompt, which is where
+     * the game is asking for the payment. Falls back to the stack, since that is where
+     * it is headed next anyway.
+     */
+    private Point paymentAnchor() {
+        final Point p = anchorOf(matchUI.getCPrompt().getView().getParentCell());
+        return p != null ? p : stackAnchor();
+    }
+
+    private Point anchorOf(final JComponent cell) {
         try {
-            final JComponent cell = matchUI.getCStack().getView().getParentCell();
             final Rectangle bounds = boundsInLayer(cell);
             if (bounds != null && bounds.width > 0) {
                 return new Point(bounds.x + bounds.width / 2, bounds.y + Math.min(90, bounds.height / 2));
             }
         } catch (final RuntimeException e) {
-            // The stack panel may not be laid out yet; fall through to the default.
+            // The panel may not be laid out yet.
         }
-        return new Point(layer.getWidth() / 2, layer.getHeight() / 3);
+        return null;
     }
 
     /** Cards whose costs are fully paid, so they have really reached the stack. */
     private final Set<Integer> castConfirmed = new HashSet<>();
     /**
-     * Cards a live drag is carrying. The cast starts as soon as the pointer crosses onto
-     * the battlefield, so the card leaves the hand while it is still being dragged - and
-     * the hand's own removal hook would otherwise plant a second copy back in the empty
-     * slot it just left, next to the one under the cursor. The drag hands its card over
-     * at the point it is released instead.
+     * Pick a card up out of its hand panel and carry it for the rest of the play.
+     * <p>
+     * Taken at the moment the panel is removed, which is the last instant its pixels can
+     * be copied, and started from exactly where the card was sitting - so the flight
+     * begins at the card the player just clicked.
      */
-    private final Set<Integer> dragOwned = new HashSet<>();
-
-    /** Claim a card for a drag in progress, suppressing the automatic pick-up. */
-    public void reserveHold(final CardView card) {
-        if (card != null) {
-            synchronized (heldCards) {
-                dragOwned.add(card.getId());
-            }
-        }
-    }
-
-    /** Give up a claim without handing anything over, e.g. when a drag is cancelled. */
-    public void releaseHold(final CardView card) {
-        if (card != null) {
-            synchronized (heldCards) {
-                dragOwned.remove(card.getId());
-            }
-        }
-    }
-
-    /** Pick a card up out of its hand panel and hold it for the duration of the cast. */
-    private void beginHold(final CardPanel panel) {
+    private void beginHold(final CardPanel panel, final Point destination) {
         final CardView card = panel.getCard();
         if (card == null) {
             return;
         }
         synchronized (heldCards) {
-            if (heldCards.containsKey(card.getId()) || dragOwned.contains(card.getId())) {
-                return; // a drag is carrying it, or has already handed one over
+            if (heldCards.containsKey(card.getId())) {
+                return;
             }
         }
         final CardSnapshot snap = CardSnapshot.capture(panel, layer);
         if (snap != null) {
-            hold(card, snap, snap.getCenter());
+            hold(card, snap, snap.getCenter(), destination);
         }
     }
 
-    /**
-     * Start carrying a card from a given point - the drag hands over here, so the card
-     * keeps hovering exactly where it was let go rather than jumping back to its old
-     * hand slot.
-     */
-    public void holdAt(final CardView card, final CardSnapshot snap, final Point at) {
-        if (card == null || snap == null || !isEnabled()) {
-            return;
-        }
-        FThreads.invokeInEdtNowOrLater(() -> hold(card, snap, at));
-    }
-
-    private void hold(final CardView card, final CardSnapshot snap, final Point at) {
+    private void hold(final CardView card, final CardSnapshot snap, final Point at,
+            final Point destination) {
         final HeldCard heldCard = new HeldCard(snap, CardColors.of(card, canShow(card)));
         if (at != null) {
             heldCard.snapTo(at);
         }
         synchronized (heldCards) {
-            dragOwned.remove(card.getId());
             final HeldCard previous = heldCards.put(card.getId(), heldCard);
             if (previous != null) {
                 previous.finish();
@@ -280,15 +266,10 @@ public final class MatchAnimator {
             }
         }
         layer.addOverlayAnim(heldCard);
-        // The card hovers where it is while the costs are still being settled. Only once
-        // they are paid does it travel to the stack - which for auto-pay is immediately,
-        // so it goes straight there from wherever it was being held.
-        if (isCastConfirmed(card.getId())) {
-            heldCard.moveTo(stackAnchor(), 0.85);
-        } else {
-            // Still owed something. It waits where it is, pulsing, until the cost is met.
-            heldCard.setAwaitingPayment(true);
-        }
+        // Straight to the stack if the costs are already settled - which for an
+        // auto-paid spell they are by now. Otherwise it waits at the prompt, where the
+        // game is asking for the payment, and moves on once that is done.
+        heldCard.moveTo(isCastConfirmed(card.getId()) ? stackAnchor() : destination, 0.85);
         clock.start();
     }
 
@@ -308,7 +289,6 @@ public final class MatchAnimator {
         }
         final HeldCard heldCard = takeHeld(card.getId());
         if (heldCard != null) {
-            heldCard.setAwaitingPayment(false);
             heldCard.moveTo(stackAnchor(), 0.85);
             clock.start();
         }
@@ -341,7 +321,6 @@ public final class MatchAnimator {
         }
         final HeldCard heldCard = takeHeld(card.getId());
         if (heldCard != null) {
-            heldCard.setAwaitingPayment(false);
             heldCard.beginRelease();
             clock.start();
         }
@@ -358,7 +337,6 @@ public final class MatchAnimator {
         }
         dropHeld(card.getId());
         final Point home = handAnchor(card);
-        heldCard.setAwaitingPayment(false);
         heldCard.moveTo(home, 0.7);
         heldCard.beginRelease();
         clock.start();
@@ -765,9 +743,15 @@ public final class MatchAnimator {
             return;
         }
         if (to == ZoneType.Stack) {
-            // A cast beginning: hold the card rather than fading it away, so it stays
+            // A cast beginning: carry the card rather than fading it away, so it stays
             // visible for as long as the game is still asking questions about it.
-            beginHold(panel);
+            beginHold(panel, paymentAnchor());
+            return;
+        }
+        if (to == ZoneType.Battlefield) {
+            // No stack involved; it is already on its way to its slot, and lands there
+            // when the panel appears.
+            beginHold(panel, stackAnchor());
             return;
         }
         final CardSnapshot snap = CardSnapshot.capture(panel, layer);
@@ -816,26 +800,6 @@ public final class MatchAnimator {
                 clock.addFree(PanelAnim.fadeIn(panel, 320));
             }
         }
-    }
-
-    /**
-     * Slide a permanent from where the player dropped it to the slot layout gave it.
-     * Called by the drag controller once the card has actually resolved.
-     */
-    public void slideIntoPlace(final CardView card, final Point fromScreenPoint) {
-        if (card == null || fromScreenPoint == null || !isEnabled()) {
-            return;
-        }
-        FThreads.invokeInEdtNowOrLater(() -> {
-            final CardPanel panel = findPanel(card);
-            if (panel == null || !panel.isShowing()) {
-                return;
-            }
-            final Point now = panel.getLocationOnScreen();
-            clock.addFree(PanelAnim.slideFrom(panel,
-                    fromScreenPoint.x - now.x - panel.getWidth() / 2,
-                    fromScreenPoint.y - now.y - panel.getHeight() / 2, 300));
-        });
     }
 
     // ------------------------------------------------------------------ geometry

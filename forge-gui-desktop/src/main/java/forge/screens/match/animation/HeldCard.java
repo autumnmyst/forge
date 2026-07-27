@@ -44,8 +44,6 @@ public final class HeldCard extends Anim {
     private float alpha = 1f;
 
     private Phase phase = Phase.MOVING;
-    private long ageMs;
-    private boolean awaitingPayment;
     private long releaseFuseMs = -1;
     private long dissolveElapsed;
     private CardPanel landingOn;
@@ -64,20 +62,12 @@ public final class HeldCard extends Anim {
         this.targetY = c.y;
     }
 
-    /** Place the card immediately, with no travel - used to take over from the drag. */
+    /** Place the card immediately, with no travel. */
     public void snapTo(final Point p) {
         this.x = p.x;
         this.y = p.y;
         this.targetX = p.x;
         this.targetY = p.y;
-    }
-
-    /**
-     * Mark the card as still owing something. It pulses while it waits, which is what
-     * distinguishes "hanging here because you have mana to tap" from a card in transit.
-     */
-    public void setAwaitingPayment(final boolean awaiting) {
-        this.awaitingPayment = awaiting;
     }
 
     /** Where the card should drift to, in overlay coordinates. */
@@ -134,7 +124,6 @@ public final class HeldCard extends Anim {
     @Override
     protected void update(final float t) {
         final long dt = 16L;
-        ageMs += dt;
         if (phase == Phase.MOVING) {
             x += (targetX - x) * FOLLOW;
             y += (targetY - y) * FOLLOW;
@@ -192,28 +181,6 @@ public final class HeldCard extends Anim {
         reveal();
     }
 
-    /**
-     * A slow pulse behind a card that is still owed something, so a card parked mid-air
-     * reads as waiting on the player rather than as a stuck animation.
-     */
-    private void drawWaitingGlow(final Graphics2D g) {
-        // Held back briefly: a card that is only passing through - a land on its way to
-        // the battlefield - should never flash a glow on the way past. Only one that is
-        // actually sitting and waiting picks it up.
-        final float strength = Ease.clamp01((ageMs - 350f) / 350f);
-        if (strength <= 0f) {
-            return;
-        }
-        final double pulse = 0.5 + 0.5 * Math.sin(ageMs / 320.0);
-        final Color tint = CardColors.brighten(palette.get(0), 0.5f);
-        for (int ring = 2; ring >= 1; ring--) {
-            final int pad = (int) (ring * 3 + pulse * 3);
-            g.setColor(CardColors.withAlpha(tint,
-                    (float) (0.13 * ring * (0.55 + 0.45 * pulse)) * strength));
-            g.fillRoundRect(-width / 2 - pad, -height / 2 - pad,
-                    width + pad * 2, height + pad * 2, 12 + pad, 12 + pad);
-        }
-    }
 
     @Override
     public void draw(final Graphics2D g) {
@@ -223,9 +190,6 @@ public final class HeldCard extends Anim {
                 gg.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, Ease.clamp01(alpha)));
                 gg.translate(x, y);
                 gg.scale(scale, scale);
-                if (awaitingPayment && phase == Phase.MOVING) {
-                    drawWaitingGlow(gg);
-                }
                 gg.drawImage(image, -width / 2, -height / 2, null);
             } finally {
                 gg.dispose();

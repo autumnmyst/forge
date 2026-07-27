@@ -160,13 +160,6 @@ public final class CMatchUI
     private final TargetingOverlay targetingOverlay = new TargetingOverlay(this);
     private final MatchAnimator animator = new MatchAnimator(this);
 
-    /** Whether the prompt is currently offering auto-payment, i.e. the whole mana cost
-     *  can be met from untapped sources. Observed from {@link #updateButtons} so the
-     *  drag-to-play gesture can tell a droppable cast from one needing more decisions. */
-    private volatile boolean autoPayOffered;
-    private volatile boolean cancelOffered;
-    private volatile boolean paymentPromptUp;
-
     private FCollectionView<PlayerView> sortedPlayers;
     private final Map<String, String> avatarImages = new HashMap<>();
     private boolean allHands;
@@ -335,7 +328,7 @@ public final class CMatchUI
     public CDock getCDock() {
         return cDock;
     }
-    CPrompt getCPrompt() {
+    public CPrompt getCPrompt() {
         return cPrompt;
     }
     /** True if either prompt input button (OK/Cancel) is currently enabled. */
@@ -469,21 +462,6 @@ public final class CMatchUI
 
     public MatchAnimator getAnimator() {
         return animator;
-    }
-
-    /** @see #autoPayOffered */
-    public boolean isAutoPayOffered() {
-        return autoPayOffered;
-    }
-
-    /** Whether the prompt currently has a live Cancel, i.e. the action can still be retracted. */
-    public boolean isCancelOffered() {
-        return cancelOffered;
-    }
-
-    /** @see #paymentPromptUp */
-    public boolean isPaymentPrompt() {
-        return paymentPromptUp;
     }
 
     @Override
@@ -903,18 +881,6 @@ public final class CMatchUI
         final boolean actualEnable1 = macroReplaying ? false : enable1;
         final boolean actualEnable2 = macroReplaying ? true : enable2;
         final boolean actualFocus1 = macroReplaying ? false : focus1;
-
-        // The payment input labels the OK button "Auto" and enables it only once the
-        // cost is provably payable from untapped sources, so this is the cleanest signal
-        // available that a dragged card can simply be dropped.
-        final boolean autoLabel = Localizer.getInstance().getMessage("lblAuto").equals(label1);
-        autoPayOffered = actualEnable1 && autoLabel;
-        // The label is "Auto" throughout the mana payment even when the cost cannot be
-        // met and the button is disabled, so this tracks "a payment is being asked for"
-        // rather than "it can be paid" - the two need telling apart, because a drag may
-        // only retract its own payment step and never a later prompt.
-        paymentPromptUp = autoLabel;
-        cancelOffered = actualEnable2;
 
         btn1.setText(macroReplaying ? "" : label1);
         btn2.setText(macroReplaying ? Localizer.getInstance().getMessage("lblCancel") : label2);
