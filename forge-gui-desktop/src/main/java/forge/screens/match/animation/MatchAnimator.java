@@ -52,7 +52,7 @@ import forge.view.arcane.CardPanel;
  */
 public final class MatchAnimator {
 
-    /** Distinct targets from one source before an effect is treated as area-of-effect. */
+    /** Distinct targets an untargeted source must hit before its damage reads as a sweep. */
     private static final int AOE_TARGET_THRESHOLD = 3;
     /** How far an attacker travels toward what it hits, as a fraction of the gap. */
     private static final float LUNGE_REACH = 0.55f;
@@ -270,33 +270,20 @@ public final class MatchAnimator {
         final List<Color> palette = CardColors.of(rec.source, canShow(rec.source));
         final AnimationStep step = new AnimationStep("resolve:" + rec.source.getName());
 
-        if (rec.targetCount() >= AOE_TARGET_THRESHOLD) {
-            // Enough targets that individual beams would be noise; sweep the boards.
-            final Set<PlayerView> affected = new HashSet<>();
-            for (final CardView c : rec.cardTargets) {
-                if (c.getController() != null) {
-                    affected.add(c.getController());
-                }
+        // One beam per target however many there are, the way the targeting arrows draw
+        // one arrow per target. A spell that names five creatures is still hitting five
+        // specific creatures, and sweeping the board instead would claim it hit
+        // everything. A sweep is for effects with no targets at all.
+        for (final CardView c : rec.cardTargets) {
+            final Point to = centreOf(c);
+            if (to != null) {
+                step.add(new BeamAnim(from, to, palette, 1f, 480));
             }
-            affected.addAll(rec.playerTargets);
-            for (final PlayerView p : affected) {
-                final Rectangle area = battlefieldBounds(p);
-                if (area != null) {
-                    step.add(new BurstAnim(area, palette, 140, 620));
-                }
-            }
-        } else {
-            for (final CardView c : rec.cardTargets) {
-                final Point to = centreOf(c);
-                if (to != null) {
-                    step.add(new BeamAnim(from, to, palette, 1f, 480));
-                }
-            }
-            for (final PlayerView p : rec.playerTargets) {
-                final Point to = avatarCentre(p);
-                if (to != null) {
-                    step.add(new BeamAnim(from, to, palette, 1f, 480));
-                }
+        }
+        for (final PlayerView p : rec.playerTargets) {
+            final Point to = avatarCentre(p);
+            if (to != null) {
+                step.add(new BeamAnim(from, to, palette, 1f, 480));
             }
         }
         if (!step.isEmpty()) {
@@ -386,7 +373,10 @@ public final class MatchAnimator {
             if (folded.contains(g)) {
                 continue;
             }
-            if (g.targetCount() >= AOE_TARGET_THRESHOLD) {
+            // Only an untargeted effect sweeps. A damage spell that names its victims
+            // gets a beam to each of them however many there are; hitting several things
+            // is not the same as hitting an area.
+            if (g.targetCount() >= AOE_TARGET_THRESHOLD && !isTargeting(g.source)) {
                 enqueueAreaEffect(g);
             } else {
                 enqueueDirectHits(g, counterHits);
@@ -466,6 +456,28 @@ public final class MatchAnimator {
             queue.enqueue(shared);
         }
         clock.start();
+    }
+
+    /**
+     * Whether this card currently has something targeted on the stack.
+     * <p>
+     * Damage events carry no notion of targeting, so this distinguishes a sweeper from a
+     * spell that merely names several victims - Pyroclasm from Cone of Flame. The cast
+     * record is still present because damage is dealt during resolution, before the
+     * resolved event that clears it.
+     */
+    private boolean isTargeting(final CardView source) {
+        if (source == null) {
+            return false;
+        }
+        synchronized (pendingCasts) {
+            for (final CastRecord rec : pendingCasts.values()) {
+                if (rec.source != null && rec.source.getId() == source.getId() && rec.targetCount() > 0) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**
