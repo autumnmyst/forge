@@ -58,6 +58,12 @@ public final class AnimationClock {
     public synchronized void addFree(final Anim anim) {
         if (anim != null) {
             free.add(anim);
+            // Registered with the layer as well, or it is only advanced and never drawn:
+            // the layer paints the queue's current step and its overlay list, and knows
+            // nothing about this one. Animations that merely move a card panel did not
+            // care, which is why it went unnoticed - but anything that paints, such as a
+            // fading ghost or a card sliding to a new slot, was invisible.
+            layer.addOverlayAnim(anim);
             start();
         }
     }

@@ -389,8 +389,21 @@ public final class MatchAnimator {
      * everything the resolution goes on to do.
      */
     private void enqueueOntoStack(final CardView host, final PlayerView activator) {
+        enqueueOntoStack(host, activator, true);
+    }
+
+    private void enqueueOntoStack(final CardView host, final PlayerView activator,
+            final boolean mayRetry) {
         final Point to = stackAnchor();
         Point from = centreOf(host);
+        if (from == null && mayRetry && host != null && host.getZone() == ZoneType.Battlefield) {
+            // An enters-the-battlefield trigger is put on the stack before the permanent's
+            // panel has been built, so there is nowhere to draw from yet. Falling back to
+            // the player here would be wrong - the ability is the permanent's, not the
+            // player's - so give the board one pass to catch up first.
+            FThreads.invokeInEdtLater(() -> enqueueOntoStack(host, activator, false));
+            return;
+        }
         if (from == null) {
             from = avatarCentre(activator);
         }
@@ -517,10 +530,17 @@ public final class MatchAnimator {
         final CardPanel panel;
         synchronized (this) {
             panel = awaitingOrigin.remove(card.getId());
+            if (panel == null) {
+                // The panel has not been built yet, so this event won the race and
+                // onPanelsAdded will do the work. Leaving the bookkeeping alone is the
+                // whole point: consuming it here made that later call see an unexpected
+                // arrival and park a card nothing would ever come back for.
+                return;
+            }
             arriving.remove(card.getId());
             arrivedFrom.remove(card.getId());
         }
-        if (panel != null && panel.getCard() != null) {
+        if (panel.getCard() != null) {
             enqueueArrival(panel, card, originFor(from, card));
         }
     }
