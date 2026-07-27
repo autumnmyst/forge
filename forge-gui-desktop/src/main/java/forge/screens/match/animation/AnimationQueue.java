@@ -82,6 +82,12 @@ public final class AnimationQueue {
         boolean changed = false;
 
         for (int guard = 0; guard < MAX_STEPS_PER_TICK; guard++) {
+            // A reservation at the head holds everything behind it, which is the point:
+            // the board refresh caused by an effect is queued before the animation of
+            // that effect can be built, so the slot is claimed first and filled second.
+            if (current == null && !waitForReservation(scaled)) {
+                break;
+            }
             if (current == null && !startNext()) {
                 break;
             }
@@ -170,6 +176,32 @@ public final class AnimationQueue {
             return 1f;
         }
         return Math.min(MAX_SCALE, 1f + (depth - CATCHUP_DEPTH) * 0.5f);
+    }
+
+    /** How long a reservation may hold the queue before it is abandoned. */
+    private static final long RESERVE_TIMEOUT_MS = 700L;
+    private long reservedWaitMs;
+
+    /**
+     * @return false while the head of the queue is a reservation still being filled in,
+     *         which stalls playback deliberately. Force-sealed after
+     *         {@link #RESERVE_TIMEOUT_MS} so a reservation nobody completes cannot wedge
+     *         the display - the board must keep converging even if an animation is lost.
+     */
+    private boolean waitForReservation(final long deltaMs) {
+        final AnimationStep head = pending.peekFirst();
+        if (head == null || head.isSealed()) {
+            reservedWaitMs = 0L;
+            return true;
+        }
+        reservedWaitMs += deltaMs;
+        if (reservedWaitMs < RESERVE_TIMEOUT_MS) {
+            return false;
+        }
+        Logger.warn("Animation reservation '" + head.getLabel() + "' was never filled in");
+        head.seal();
+        reservedWaitMs = 0L;
+        return true;
     }
 
     /** Promote the next queued step to current and run its {@code before} hook. */

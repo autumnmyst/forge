@@ -24,9 +24,36 @@ public final class AnimationStep {
     private Runnable before;
     private Runnable after;
     private long holdMs;
+    private volatile boolean sealed = true;
 
     public AnimationStep(final String label) {
         this.label = label;
+    }
+
+    /**
+     * Claim a place in the queue before knowing what will go in it.
+     * <p>
+     * Lets a slot be taken on the game thread the instant something starts happening,
+     * and filled in later once the display can be measured. Anything queued afterwards -
+     * notably the board refresh caused by that same effect - therefore lands behind it,
+     * which is the only way an animation can precede the board change it depicts when
+     * the change is announced first.
+     * <p>
+     * The queue will not start an unsealed step, so a reservation must always be
+     * {@link #seal()}ed. It is force-sealed after a timeout rather than trusted.
+     */
+    public AnimationStep reserved() {
+        this.sealed = false;
+        return this;
+    }
+
+    /** Mark a reservation ready to play. */
+    public void seal() {
+        this.sealed = true;
+    }
+
+    boolean isSealed() {
+        return sealed;
     }
 
     public AnimationStep add(final Anim anim) {

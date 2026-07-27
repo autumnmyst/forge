@@ -183,6 +183,42 @@ public class AnimationQueueTest {
         assertTrue(q.getDepth() <= 21, "genuine motion backlog is still bounded, was " + q.getDepth());
     }
 
+    /**
+     * A reservation exists so an animation can claim its place before it is known what
+     * goes in it, holding back the board refresh that the same effect already queued.
+     */
+    @Test
+    public void aReservationHoldsTheQueueUntilItIsSealed() {
+        final List<String> log = new ArrayList<>();
+        final AnimationQueue q = new AnimationQueue();
+        final AnimationStep reserved = new AnimationStep("reserved").reserved()
+                .after(() -> log.add("reserved"));
+        q.enqueue(reserved);
+        q.enqueue(new AnimationStep("board").after(() -> log.add("board")));
+
+        q.tick(16);
+        assertTrue(log.isEmpty(), "nothing may run past an unfilled reservation");
+
+        reserved.seal();
+        q.tick(16);
+        assertEquals(log, List.of("reserved", "board"), "and then both run, in order");
+    }
+
+    @Test
+    public void anAbandonedReservationDoesNotWedgeTheQueue() {
+        final List<String> log = new ArrayList<>();
+        final AnimationQueue q = new AnimationQueue();
+        q.enqueue(new AnimationStep("never").reserved().after(() -> log.add("never")));
+        q.enqueue(new AnimationStep("board").after(() -> log.add("board")));
+
+        // Never sealed: the board must still converge once the timeout expires.
+        for (int i = 0; i < 100 && log.size() < 2; i++) {
+            q.tick(16);
+        }
+        assertEquals(log, List.of("never", "board"));
+        assertTrue(q.isIdle());
+    }
+
     @Test
     public void pausedQueueHoldsWithoutDropping() {
         final List<String> log = new ArrayList<>();

@@ -362,7 +362,21 @@ public final class MatchAnimator {
             // A fizzled spell never reached anything, so showing it connect would lie.
             return;
         }
-        FThreads.invokeInEdtLater(() -> enqueueResolution(rec));
+        // Claim the slot here, on the game thread, before returning. A resolution's own
+        // board changes - the creature it destroyed leaving play - are announced before
+        // this event, so their refresh is already queued for the EDT. Reserving now puts
+        // this animation ahead of that refresh; filling it in afterwards would put it
+        // behind, which is why the beam used to arrive after the creature had gone.
+        final AnimationStep step = new AnimationStep("resolve:" + rec.source.getName()).reserved();
+        queue.enqueue(step);
+        clock.start();
+        FThreads.invokeInEdtLater(() -> {
+            try {
+                enqueueResolution(rec, step);
+            } finally {
+                step.seal();
+            }
+        });
     }
 
     /**
@@ -410,13 +424,17 @@ public final class MatchAnimator {
         }
     }
 
-    private void enqueueResolution(final CastRecord rec) {
+    /**
+     * Fill in the slot reserved when the resolution was announced.
+     *
+     * @param step already in the queue, ahead of the board refresh this effect caused.
+     */
+    private void enqueueResolution(final CastRecord rec, final AnimationStep step) {
         // Everything a resolution does comes out of the stack, because that is where the
         // spell or ability is. Its trip out of its source was already shown when it was
         // put there, so repeating that here would tell the same half of the story twice.
         final Point from = stackAnchor();
         final List<Color> palette = CardColors.of(rec.source, canShow(rec.source));
-        final AnimationStep step = new AnimationStep("resolve:" + rec.source.getName());
 
         // One beam per target however many there are, the way the targeting arrows draw
         // one arrow per target. A spell that names five creatures is still hitting five
@@ -446,10 +464,8 @@ public final class MatchAnimator {
             final Point at = centreOf(rec.source);
             step.add(new ImpactAnim(at != null ? at : from, palette, 2f, 420, 0f));
         }
-        if (step.isEmpty()) {
-            return; // a permanent spell; its arrival draws the beam to where it lands
-        }
-        queue.enqueue(step);
+        // Already queued. Left empty for a permanent spell, whose arrival draws the beam
+        // to where it lands; an empty step simply drains.
         clock.start();
     }
 
