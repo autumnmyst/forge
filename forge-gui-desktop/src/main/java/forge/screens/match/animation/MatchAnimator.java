@@ -583,6 +583,24 @@ public final class MatchAnimator {
         panel.setRenderAlpha(0f);
         panel.repaint();
 
+        // A card must never be left invisible because an animation did not run. The step
+        // below reveals it in the normal case, but a reservation the queue gave up on has
+        // already played by the time it is filled, so its hook would never fire. This
+        // runs regardless and is harmless when the step got there first.
+        clock.addFree(new Anim(600) {
+            @Override
+            protected void update(final float t) {
+            }
+
+            @Override
+            protected void onEnd() {
+                if (panel.getRenderAlpha() <= 0f) {
+                    panel.clearRenderTransform();
+                    panel.repaint();
+                }
+            }
+        });
+
         // Fill the slot claimed when the zone change was announced, so this plays before
         // anything queued since - notably the card's own enters-the-battlefield trigger
         // going on the stack. Falls back to a fresh step for an arrival nobody reserved.
