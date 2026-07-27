@@ -62,6 +62,14 @@ public final class HeldCard extends Anim {
         this.targetY = c.y;
     }
 
+    /** Place the card immediately, with no travel - used to take over from the drag. */
+    public void snapTo(final Point p) {
+        this.x = p.x;
+        this.y = p.y;
+        this.targetX = p.x;
+        this.targetY = p.y;
+    }
+
     /** Where the card should drift to, in overlay coordinates. */
     public void moveTo(final Point p, final double scaleTo) {
         this.targetX = p.x;

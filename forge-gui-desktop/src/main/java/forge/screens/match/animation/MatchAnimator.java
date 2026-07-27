@@ -132,6 +132,7 @@ public final class MatchAnimator {
                 layer.removeOverlayAnim(h);
             }
             heldCards.clear();
+            castConfirmed.clear();
         }
     }
 
@@ -207,14 +208,43 @@ public final class MatchAnimator {
         return new Point(layer.getWidth() / 2, layer.getHeight() / 3);
     }
 
+    /** Cards whose costs are fully paid, so they have really reached the stack. */
+    private final Set<Integer> castConfirmed = new HashSet<>();
+
     /** Pick a card up out of its hand panel and hold it for the duration of the cast. */
     private void beginHold(final CardPanel panel) {
         final CardView card = panel.getCard();
-        final CardSnapshot snap = CardSnapshot.capture(panel, layer);
-        if (snap == null) {
+        if (card == null) {
             return;
         }
+        synchronized (heldCards) {
+            if (heldCards.containsKey(card.getId())) {
+                return; // a drag already handed one over, at the point it was released
+            }
+        }
+        final CardSnapshot snap = CardSnapshot.capture(panel, layer);
+        if (snap != null) {
+            hold(card, snap, snap.getCenter());
+        }
+    }
+
+    /**
+     * Start carrying a card from a given point - the drag hands over here, so the card
+     * keeps hovering exactly where it was let go rather than jumping back to its old
+     * hand slot.
+     */
+    public void holdAt(final CardView card, final CardSnapshot snap, final Point at) {
+        if (card == null || snap == null || !isEnabled()) {
+            return;
+        }
+        FThreads.invokeInEdtNowOrLater(() -> hold(card, snap, at));
+    }
+
+    private void hold(final CardView card, final CardSnapshot snap, final Point at) {
         final HeldCard heldCard = new HeldCard(snap, CardColors.of(card, canShow(card)));
+        if (at != null) {
+            heldCard.snapTo(at);
+        }
         synchronized (heldCards) {
             final HeldCard previous = heldCards.put(card.getId(), heldCard);
             if (previous != null) {
@@ -223,8 +253,34 @@ public final class MatchAnimator {
             }
         }
         layer.addOverlayAnim(heldCard);
-        heldCard.moveTo(stackAnchor(), 0.85);
+        // The card hovers where it is while the costs are still being settled. Only once
+        // they are paid does it travel to the stack - which for auto-pay is immediately,
+        // so it goes straight there from wherever it was being held.
+        if (isCastConfirmed(card.getId())) {
+            heldCard.moveTo(stackAnchor(), 0.85);
+        }
         clock.start();
+    }
+
+    private boolean isCastConfirmed(final int cardId) {
+        synchronized (heldCards) {
+            return castConfirmed.contains(cardId);
+        }
+    }
+
+    /** The costs are paid: send the hovering card to the stack. */
+    private void onCastConfirmed(final CardView card) {
+        if (card == null) {
+            return;
+        }
+        synchronized (heldCards) {
+            castConfirmed.add(card.getId());
+        }
+        final HeldCard heldCard = takeHeld(card.getId());
+        if (heldCard != null) {
+            heldCard.moveTo(stackAnchor(), 0.85);
+            clock.start();
+        }
     }
 
     private HeldCard takeHeld(final int cardId) {
@@ -236,6 +292,7 @@ public final class MatchAnimator {
     private void dropHeld(final int cardId) {
         synchronized (heldCards) {
             heldCards.remove(cardId);
+            castConfirmed.remove(cardId);
         }
     }
 
@@ -296,6 +353,14 @@ public final class MatchAnimator {
 
     private void recordCast(final GameEventSpellAbilityCast e) {
         final StackItemView si = e.si();
+        // This event is fired from MagicStack.add, reached only once the cost payment has
+        // succeeded - so it is the moment every cost is settled and the card genuinely
+        // arrives on the stack. Handled before the target bookkeeping below, which bails
+        // out early for spells that target nothing.
+        if (si != null) {
+            final CardView host = si.getSourceCard();
+            FThreads.invokeInEdtNowOrLater(() -> onCastConfirmed(host));
+        }
         if (si == null || e.sa() == null) {
             return;
         }

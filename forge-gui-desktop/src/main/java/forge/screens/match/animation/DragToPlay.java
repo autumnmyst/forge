@@ -44,6 +44,8 @@ public final class DragToPlay extends CardPanelMouseAdapter {
     private final MatchAnimator animator;
 
     private CardPanel sourcePanel;
+    /** Picture of the dragged card, handed to the animator so it can keep carrying it. */
+    private CardSnapshot snapshot;
     /** The card whose cast this drag started, so it can be cancelled or completed. */
     private CardView sourceCard;
     private DragGhost ghost;
@@ -166,6 +168,7 @@ public final class DragToPlay extends CardPanelMouseAdapter {
             return;
         }
         sourcePanel = dragPanel;
+        snapshot = snap;
         ghost = new DragGhost(snap, snap.getCenter());
         animator.getLayer().addOverlayAnim(ghost);
         animator.getClock().start();
@@ -210,6 +213,12 @@ public final class DragToPlay extends CardPanelMouseAdapter {
         // ended up. Claiming the drag stops the hand controller reordering a slot that
         // is not there any more.
         final boolean castStarted = sourceCard != null;
+        if (castStarted) {
+            // Hand the card over to the animator at the point it was released, so it
+            // carries on hovering there while the cost is paid rather than snapping back
+            // to the hand slot it came from.
+            animator.holdAt(sourceCard, snapshot, drop);
+        }
         finishDrag();
         consumed = castStarted;
 
