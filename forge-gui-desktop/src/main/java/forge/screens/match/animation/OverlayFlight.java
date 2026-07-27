@@ -61,9 +61,16 @@ public final class OverlayFlight extends Anim {
      * @param fromScale the card's old width over its new one; above 1 when it shrank.
      */
     public static OverlayFlight reflow(final CardPanel panel, final CardSnapshot snap,
-            final int dx, final int dy, final double fromScale, final long durationMs) {
-        final OverlayFlight f = new OverlayFlight(panel, snap, dx, dy, 1f, false, durationMs);
+            final Point toTopLeft, final double fromScale, final long durationMs) {
+        // Stated as where the copy is now and where it must end up, rather than as an
+        // offset. The copy may have been taken before layout ran or after it, so its own
+        // position is not a fixed reference and an offset would mean different things in
+        // the two cases.
+        final Rectangle at = snap.getBounds();
+        final OverlayFlight f = new OverlayFlight(panel, snap,
+                at.x - toTopLeft.x, at.y - toTopLeft.y, 1f, false, durationMs);
         f.fromScale = fromScale;
+        f.start.setLocation(toTopLeft);
         return f;
     }
 

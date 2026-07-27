@@ -42,6 +42,7 @@ import forge.localinstance.properties.ForgePreferences.FPref;
 import forge.util.Localizer;
 import forge.model.FModel;
 import forge.screens.match.CMatchUI;
+import forge.screens.match.animation.CardSnapshot;
 import forge.screens.match.animation.MatchAnimator;
 import forge.toolbox.FScrollPane;
 import forge.toolbox.MouseTriggerEvent;
@@ -424,6 +425,16 @@ public class PlayArea extends CardPanelContainer implements CardPanelMouseListen
 
     /** Card bounds before the last layout, so the change can be eased rather than jumped. */
     private final Map<Integer, Rectangle> boundsBeforeLayout = new HashMap<>();
+    /**
+     * Card images from before the last layout, taken only when a reflow is coming.
+     * <p>
+     * A card copied *after* layout has already been given its new bounds but not
+     * necessarily its rescaled art, so on a resize the copy is the card's empty frame.
+     * Copying beforehand catches it whole - but it is far too expensive to do on every
+     * validation, hence the flag.
+     */
+    private final Map<Integer, CardSnapshot> imagesBeforeLayout = new HashMap<>();
+    private boolean reflowExpected;
 
     @Override
     public final void doLayout() {
@@ -528,8 +539,20 @@ public class PlayArea extends CardPanelContainer implements CardPanelMouseListen
     /** Remember where every card is sitting, just before layout moves them all. */
     private void captureBoundsForReflow() {
         boundsBeforeLayout.clear();
+        imagesBeforeLayout.clear();
         if (getMatchUI() == null || !getMatchUI().getAnimator().isEnabled()) {
             return;
+        }
+        final MatchAnimator animator = getMatchUI().getAnimator();
+        if (reflowExpected) {
+            for (final CardPanel p : getCardPanels()) {
+                if (p.getCard() != null && p.getCardWidth() > 0) {
+                    final CardSnapshot snap = CardSnapshot.capture(p, animator.getLayer());
+                    if (snap != null) {
+                        imagesBeforeLayout.put(p.getCard().getId(), snap);
+                    }
+                }
+            }
         }
         for (final CardPanel p : getCardPanels()) {
             if (p.getCard() != null && p.getCardWidth() > 0) {
@@ -577,9 +600,11 @@ public class PlayArea extends CardPanelContainer implements CardPanelMouseListen
                     && Math.abs(scale - 1) < REFLOW_MIN_SCALE) {
                 continue;
             }
-            animator.reflow(p, dx, dy, scale);
+            animator.reflow(p, dx, dy, scale, imagesBeforeLayout.get(p.getCard().getId()));
         }
         boundsBeforeLayout.clear();
+        imagesBeforeLayout.clear();
+        reflowExpected = false;
     }
 
     private static final int REFLOW_MIN_SHIFT = 3;
@@ -1081,6 +1106,10 @@ public class PlayArea extends CardPanelContainer implements CardPanelMouseListen
             }
         }
         if (needLayoutRefresh) {
+            // Cards have entered or left, so this layout is the one that will shuffle and
+            // resize everything else. Worth copying each card first so the reflow has an
+            // intact image to animate; ordinary revalidations are not.
+            reflowExpected = true;
             doLayout();
         }
 
