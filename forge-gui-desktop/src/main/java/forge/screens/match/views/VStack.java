@@ -139,18 +139,22 @@ public class VStack implements IVDoc<CStack> {
 
         final FCollectionView<StackItemView> items = model.getStack();
 
-        // Entries whose trail is still travelling are left out, so the stack fills in one
-        // at a time as each arrives rather than showing everything the game has already
-        // pushed. The list itself is still read live - only which of it is ready to be
-        // seen is the animator's business - so the stack cannot drift out of step with
-        // the game, it can only lag it.
+        // What is drawn is the stack as the animations have told it so far: an entry
+        // appears when its trail lands and stays until its resolution has played, however
+        // long ago the game itself finished with it. The live list is still the source -
+        // the animator only decides which of it is ready to be seen and what is not
+        // finished being seen - so the display can lag the stack but never contradict it.
+        final Iterable<StackItemView> live = controller.getMatchUI().isNetGame()
+                ? items.threadSafeIterable() : items;
         final MatchAnimator animator = controller.getMatchUI().getAnimator();
-        final List<StackItemView> visible = new ArrayList<>();
-        for (final StackItemView item : (controller.getMatchUI().isNetGame()
-                ? items.threadSafeIterable() : items)) {
-            if (animator == null || animator.isStackItemVisible(item)) {
+        final List<StackItemView> visible;
+        if (animator == null) {
+            visible = new ArrayList<>();
+            for (final StackItemView item : live) {
                 visible.add(item);
             }
+        } else {
+            visible = animator.displayStack(live);
         }
 
         tab.setText(Localizer.getInstance().getMessage("lblStack") + " : " + visible.size());

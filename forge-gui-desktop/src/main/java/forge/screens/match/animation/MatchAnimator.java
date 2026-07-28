@@ -9,6 +9,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -20,6 +21,7 @@ import javax.swing.SwingUtilities;
 
 import forge.card.MagicColor;
 import forge.game.GameEntityView;
+import forge.game.GameView;
 import forge.game.card.CardView;
 import forge.game.card.CardView.CardStateView;
 import forge.game.combat.CombatView;
@@ -215,6 +217,9 @@ public final class MatchAnimator {
         stagedLife.clear();
         damageClaimed.clear();
         stackNotYetShown.clear();
+        synchronized (stackLingering) {
+            stackLingering.clear();
+        }
         thawAllCards();
         resolving = null;
         synchronized (pendingMods) {
@@ -407,6 +412,20 @@ public final class MatchAnimator {
         private final Map<Integer, Point> targetPoints = new HashMap<>();
         /** The stack entry this put there, so it can be released if it never resolves. */
         private int stackItemId;
+        /**
+         * The entry itself, kept so it can still be drawn after the game has taken it off
+         * the stack and there is nothing live left to read it from.
+         */
+        private StackItemView stackItem;
+        /**
+         * The entry that sat directly beneath this one when it was put there.
+         * <p>
+         * Recorded at cast time because it is stable: the stack only ever grows and
+         * shrinks at the top, so whatever was underneath an entry stays underneath it for
+         * as long as the entry exists. That is what lets a resolved entry be drawn back
+         * into its old position rather than simply piled on top.
+         */
+        private Integer belowId;
 
         CastRecord(final CardView source) {
             this.source = source;
@@ -480,6 +499,8 @@ public final class MatchAnimator {
         // entry at a time rather than showing everything the game has already pushed.
         final int stackItemId = si.getId();
         rec.stackItemId = stackItemId;
+        rec.stackItem = si;
+        rec.belowId = idBelowOnStack(si);
         if (isEnabled()) {
             stackNotYetShown.add(stackItemId);
         }
@@ -517,12 +538,29 @@ public final class MatchAnimator {
         synchronized (pendingCasts) {
             rec = pendingCasts.remove(sa);
         }
-        // Countered, or otherwise taken off the stack without resolving. Its trail may
-        // never play, and an entry held back for a trail that never comes would be missing
-        // from the list for as long as the stack stayed busy.
+        // Countered, or otherwise taken off the stack without resolving. It still leaves
+        // in queue order rather than the instant the game says so, so a counterspell's
+        // trail reaches a stack that still has something on it.
         if (rec != null) {
-            FThreads.invokeInEdtLater(() -> showStackItem(rec.stackItemId));
+            unstackInOrder(rec, "countered:" + nameOf(rec.source));
         }
+    }
+
+    /**
+     * Keep an entry in the list past the game removing it, and take it out again when the
+     * queue reaches this point.
+     * <p>
+     * An empty step costs no wall time - the drain loop takes several of them per frame -
+     * so this does not slow the stack down. All it does is place the removal among the
+     * animations rather than ahead of all of them, which is the difference between an
+     * entry that disappears while its trail is still on its way and one that leaves when
+     * its trail does.
+     */
+    private void unstackInOrder(final CastRecord rec, final String label) {
+        final int id = rec.stackItemId;
+        FThreads.invokeInEdtLater(() -> lingerStackItem(rec));
+        queue.enqueue(new AnimationStep(label).then(() -> hideStackItem(id)));
+        clock.start();
     }
 
     // ------------------------------------------------------------------ resolution scope
@@ -1193,14 +1231,21 @@ public final class MatchAnimator {
         // the resolution itself already drew while it was running.
         final Resolution scope = resolving;
         if (rec != null) {
-            // It is leaving the stack, so there is nothing left to hold back. Without this
-            // an entry whose trail was still travelling when it resolved would stay in the
-            // held set, and the safety release on idle would be the only thing to clear it.
-            final int stackItemId = rec.stackItemId;
-            FThreads.invokeInEdtLater(() -> showStackItem(stackItemId));
+            // Kept in the list until the resolution itself has played, rather than dropped
+            // the moment the game takes it off. The game can resolve a whole stack faster
+            // than one trail crosses the board, and an entry that vanishes on its way to
+            // being shown means a stack that is never visible at all.
+            FThreads.invokeInEdtLater(() -> lingerStackItem(rec));
         }
         if (rec == null || e.hasFizzled()) {
-            // A fizzled spell never reached anything, so showing it connect would lie.
+            // A fizzled spell never reached anything, so showing it connect would lie -
+            // but it still has to leave the list, in order, like anything else.
+            if (rec != null) {
+                final int fizzled = rec.stackItemId;
+                queue.enqueue(new AnimationStep("fizzle:" + nameOf(rec.source))
+                        .then(() -> hideStackItem(fizzled)));
+                clock.start();
+            }
             resolving = null;
             return;
         }
@@ -1277,6 +1322,11 @@ public final class MatchAnimator {
      */
     private void enqueueResolution(final CastRecord rec, final AnimationStep step,
             final Resolution scope) {
+        // The entry leaves the list when this step has played, not when the game removed
+        // it. For a permanent spell the step is empty and the arrival queued ahead of it
+        // is what the player is watching; either way the entry outlasts its own resolution.
+        final int stackItemId = rec.stackItemId;
+        step.then(() -> hideStackItem(stackItemId));
         // Everything a resolution does comes out of the stack, because that is where the
         // spell or ability is. Its trip out of its source was already shown when it was
         // put there, so repeating that here would tell the same half of the story twice.
@@ -2107,9 +2157,89 @@ public final class MatchAnimator {
      */
     private final Set<Integer> stackNotYetShown = ConcurrentHashMap.newKeySet();
 
-    /** Whether this entry's trail has landed and it may be drawn. */
-    public boolean isStackItemVisible(final StackItemView item) {
-        return item == null || !isEnabled() || !stackNotYetShown.contains(item.getId());
+    /**
+     * Entries the game has taken off the stack whose resolution has not been animated yet.
+     * <p>
+     * The display therefore lags the stack at both ends: an entry appears when its trail
+     * lands and leaves when its resolution plays, so the sequence the player watches is
+     * the one the animations tell. Everything here is released when the queue empties, so
+     * the lag is bounded and the list always ends up agreeing with the game.
+     */
+    private final Map<Integer, LingeringEntry> stackLingering = new LinkedHashMap<>();
+
+    /** Bound on entries kept past their removal, so a missed hook cannot accumulate. */
+    private static final int MAX_LINGERING = 16;
+
+    /** A stack entry outliving its own removal, and where it sat while it was real. */
+    private static final class LingeringEntry {
+        private final StackItemView item;
+        private final Integer belowId;
+
+        LingeringEntry(final StackItemView item, final Integer belowId) {
+            this.item = item;
+            this.belowId = belowId;
+        }
+    }
+
+    /**
+     * The entries to draw: the live stack, minus what has not arrived yet, plus what has
+     * gone but not yet been seen to go.
+     * <p>
+     * Built from the live list rather than kept as a snapshot, so a stack the animator
+     * knows nothing about still displays exactly as the game has it.
+     */
+    public List<StackItemView> displayStack(final Iterable<StackItemView> live) {
+        final List<StackItemView> out = new ArrayList<>();
+        if (!isEnabled()) {
+            for (final StackItemView item : live) {
+                out.add(item);
+            }
+            return out;
+        }
+        final List<LingeringEntry> held;
+        synchronized (stackLingering) {
+            held = new ArrayList<>(stackLingering.values());
+        }
+        final Set<Integer> emitted = new HashSet<>();
+        for (final StackItemView item : live) {
+            final int id = item.getId();
+            // Whatever used to sit on top of this one goes back on top of it.
+            emitLingering(id, held, emitted, out);
+            if (emitted.add(id) && !stackNotYetShown.contains(id)) {
+                out.add(item);
+            }
+        }
+        // Entries that were the last thing on the stack have nothing to sit above, so
+        // they go underneath what has been played since; and anything whose neighbour has
+        // itself gone is shown at the bottom rather than quietly dropped.
+        emitLingering(null, held, emitted, out);
+        for (final LingeringEntry e : held) {
+            final int id = e.item.getId();
+            if (emitted.add(id) && !stackNotYetShown.contains(id)) {
+                out.add(e.item);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Place the entries that sat directly above {@code anchorId}, and recursively those
+     * above them, so a run of entries resolved in quick succession comes back in the order
+     * it was in rather than the order it left.
+     */
+    private void emitLingering(final Integer anchorId, final List<LingeringEntry> held,
+            final Set<Integer> emitted, final List<StackItemView> out) {
+        for (final LingeringEntry e : held) {
+            final int id = e.item.getId();
+            if (emitted.contains(id) || !Objects.equals(e.belowId, anchorId)) {
+                continue;
+            }
+            emitted.add(id);
+            emitLingering(id, held, emitted, out);
+            if (!stackNotYetShown.contains(id)) {
+                out.add(e.item);
+            }
+        }
     }
 
     /** Show an entry, once the trail that carried it has arrived. */
@@ -2117,6 +2247,70 @@ public final class MatchAnimator {
         if (stackNotYetShown.remove(id)) {
             refreshStack();
         }
+    }
+
+    /** Keep an entry in the list after the game has removed it from the stack. */
+    private void lingerStackItem(final CastRecord rec) {
+        if (!isEnabled() || rec.stackItem == null) {
+            return;
+        }
+        synchronized (stackLingering) {
+            stackLingering.put(rec.stackItemId, new LingeringEntry(rec.stackItem, rec.belowId));
+            while (stackLingering.size() > MAX_LINGERING) {
+                stackLingering.remove(stackLingering.keySet().iterator().next());
+            }
+        }
+        refreshStack();
+    }
+
+    /** Take an entry out of the list, its resolution having now been played. */
+    private void hideStackItem(final int id) {
+        final boolean lingered;
+        synchronized (stackLingering) {
+            lingered = stackLingering.remove(id) != null;
+        }
+        // Released from the other side too: an entry whose trail never landed would
+        // otherwise stay held for a spell that has already come and gone.
+        final boolean held = stackNotYetShown.remove(id);
+        if (lingered || held) {
+            refreshStack();
+        }
+    }
+
+    /**
+     * The entry directly beneath one just put on the stack.
+     * <p>
+     * Read here, on the game thread, while the stack still has both of them. The tail of
+     * the list is walked rather than assumed because a spell that has not been pushed yet
+     * would otherwise be recorded as sitting on itself.
+     */
+    private Integer idBelowOnStack(final StackItemView si) {
+        try {
+            final GameView game = matchUI.getGameView();
+            if (game == null) {
+                return null;
+            }
+            Integer first = null;
+            boolean seen = false;
+            for (final StackItemView item : game.getStack()) {
+                final int id = item.getId();
+                if (seen) {
+                    return id;
+                }
+                if (id == si.getId()) {
+                    seen = true;
+                } else if (first == null) {
+                    first = id;
+                }
+            }
+            return seen ? null : first;
+        } catch (final RuntimeException ignored) {
+            return null;
+        }
+    }
+
+    private static String nameOf(final CardView card) {
+        return card == null ? "spell" : card.getName();
     }
 
     private void refreshStack() {
@@ -2127,10 +2321,19 @@ public final class MatchAnimator {
         }
     }
 
-    /** Release every held entry. Called when the display has caught up with the game. */
+    /**
+     * Give up every hold on the stack list. Called when the display has caught up with
+     * the game, which is the point at which lagging it would only be lying about it.
+     */
     private void showAllStackItems() {
-        if (!stackNotYetShown.isEmpty()) {
-            stackNotYetShown.clear();
+        final boolean lingered;
+        synchronized (stackLingering) {
+            lingered = !stackLingering.isEmpty();
+            stackLingering.clear();
+        }
+        final boolean held = !stackNotYetShown.isEmpty();
+        stackNotYetShown.clear();
+        if (lingered || held) {
             refreshStack();
         }
     }
