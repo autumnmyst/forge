@@ -94,6 +94,17 @@ public final class MatchAnimator {
      */
     private static final List<Color> REPLACEMENT_PALETTE =
             List.of(new Color(255, 226, 74), new Color(255, 250, 190));
+    /**
+     * How big a spark on a card is. Scales the spray outwards and the number of sparks
+     * with it, so a larger value reads as a wider flash rather than a denser one.
+     * <p>
+     * Unlike a damage impact, which is sized by how hard it hit, a card changing has no
+     * magnitude to scale by - these are fixed, and are the dial to turn if the sparks
+     * want to be more or less prominent.
+     */
+    private static final float MODIFY_SPARK = 3.0f;
+    /** Slightly bigger again, since a replacement effect is the rarer, louder event. */
+    private static final float REPLACEMENT_SPARK = 3.4f;
     /** How far an attacker travels toward what it hits, as a fraction of the gap. */
     private static final float LUNGE_REACH = 0.55f;
     private static final long LUNGE_MS = 420L;
@@ -829,8 +840,9 @@ public final class MatchAnimator {
                 continue;
             }
             step.add(m.replacement
-                    ? new ImpactAnim(at, REPLACEMENT_PALETTE, 1.6f, 420, 0f).delayedBy(sparkAt)
-                    : new ImpactAnim(at, CardColors.of(m.card, canShow(m.card)), 1.4f, 400, 0f)
+                    ? new ImpactAnim(at, REPLACEMENT_PALETTE, REPLACEMENT_SPARK, 420, 0f)
+                            .delayedBy(sparkAt)
+                    : new ImpactAnim(at, CardColors.of(m.card, canShow(m.card)), MODIFY_SPARK, 400, 0f)
                             .delayedBy(sparkAt));
             // The card was frozen when its change was announced; the spark is the moment
             // it is allowed to show what it became.
