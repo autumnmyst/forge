@@ -963,15 +963,20 @@ public final class MatchAnimator {
         final List<ModRecord> visible = new ArrayList<>(mods.size());
         final List<ModRecord> notLandedYet = new ArrayList<>(0);
         for (final ModRecord m : mods) {
-            if (centreOf(m.card) == null) {
-                continue;
-            }
             // A card can be changed before it is on screen - a planeswalker is given its
             // loyalty on the way in, and anything entering with counters or under a lord
             // is in the same position. Sparking now would flash at an empty slot and only
             // then animate the card turning up, so this waits for it to land. It still
             // counts towards the sweep below: the effect did reach that board.
-            (isAwaitingArrival(m.card) ? notLandedYet : visible).add(m);
+            //
+            // Asked before measuring, not after. A card that has not arrived has nowhere
+            // to be measured to, so testing the position first threw these away as
+            // unplaceable and the wait never happened.
+            final boolean waiting = isAwaitingArrival(m.card);
+            if (!waiting && centreOf(m.card) == null) {
+                continue;
+            }
+            (waiting ? notLandedYet : visible).add(m);
             // A replacement effect firing is about the card it is printed on, not about
             // whatever effect happened to be resolving, so it is never counted towards a
             // board sweep and never takes the effect's colours.
@@ -1036,10 +1041,45 @@ public final class MatchAnimator {
         }
     }
 
-    /** Whether a card has a panel that is still hidden, waiting for its own arrival. */
+    /** Whether a card is still on its way in and has not been shown on the board yet. */
     private boolean isAwaitingArrival(final CardView card) {
+        if (card == null) {
+            return false;
+        }
+        synchronized (this) {
+            if (pendingArrivals.containsKey(card.getId())) {
+                return true;
+            }
+        }
         final CardPanel panel = findPanel(card);
         return panel != null && panel.getRenderAlpha() <= 0f;
+    }
+
+    /**
+     * The battlefield panel for a card that is arriving, building it if the zone update
+     * has not got here yet.
+     * <p>
+     * The arrival is queued the moment the card enters, and the panel is created when the
+     * zone update reaches the UI - two things on the same thread with no order between
+     * them. Losing that race meant the arrival had nowhere to aim: it drew to the card
+     * still sitting in the hand it came from, and the panel that turned up afterwards was
+     * hidden by an arrival that had already finished. Asking the tabletop to take in what
+     * has arrived is idempotent and reads the same live model the deferred refresh would,
+     * so the panel is simply built a moment early.
+     */
+    private CardPanel panelForArrival(final CardView card) {
+        final CardPanel existing = findPanel(card);
+        if (existing != null) {
+            return existing;
+        }
+        for (final VField f : matchUI.getFieldViews()) {
+            try {
+                f.getTabletop().addArrivedPanels();
+            } catch (final RuntimeException ignored) {
+                // A tabletop mid-teardown; the others are still worth asking.
+            }
+        }
+        return findPanel(card);
     }
 
     /**
@@ -1551,6 +1591,20 @@ public final class MatchAnimator {
         // consumed as its baseline, and the change it was reporting is never shown.
         fingerprints.put(card.getId(), fingerprint(card));
 
+        final boolean stillComing;
+        synchronized (this) {
+            stillComing = pendingArrivals.containsKey(card.getId());
+        }
+        if (!stillComing) {
+            // The arrival has already played, so there is no step left to reveal this and
+            // hiding it would leave the card invisible until the safety timer above. Fade
+            // it up now instead: the particles are gone, but the card still arrives rather
+            // than appearing out of nothing.
+            panel.setRenderAlpha(0f);
+            clock.addFree(PanelAnim.fadeIn(panel, 320));
+            return;
+        }
+
         // Nothing queued here: the arrival was queued when the card entered, which is the
         // only position that keeps it ahead of whatever the arrival triggered. All this
         // has to do is make sure the card is not visible before that step reveals it.
@@ -1570,7 +1624,7 @@ public final class MatchAnimator {
         // Idempotent, because it is asked for twice: once as the trail lands, and again
         // when the step ends in case the first never happened.
         final Runnable reveal = () -> {
-            final CardPanel panel = findPanel(card);
+            final CardPanel panel = panelForArrival(card);
             if (panel == null || panel.getRenderAlpha() > 0f) {
                 return;
             }
@@ -1587,7 +1641,7 @@ public final class MatchAnimator {
         final AnimationStep step = new AnimationStep("arrive:" + card.getName()).after(reveal);
         step.add(new BeamAnim(
                 () -> originFor(from, card),
-                () -> centreOf(findPanel(card)),
+                () -> centreOf(panelForArrival(card)),
                 CardColors.of(card, canShow(card)), 1f, ARRIVAL_BEAM_MS));
         // As the trail arrives, not once it has finished. A beam spends its last stretch
         // letting the trailing sparks catch up, and waiting for that left a visible pause
@@ -2497,6 +2551,15 @@ public final class MatchAnimator {
             final CardPanel p = f.getTabletop().getCardPanel(id);
             if (p != null) {
                 return p;
+            }
+        }
+        // A card on its way to the battlefield is not to be found in the hand it is
+        // leaving. The hand copy is only still there because zone refreshes are deferred,
+        // and answering with it sent the arrival beam back into the player's hand and
+        // sparked changes on a card that had already left it.
+        synchronized (this) {
+            if (pendingArrivals.containsKey(id)) {
+                return null;
             }
         }
         for (final VHand h : matchUI.getHandViews()) {
