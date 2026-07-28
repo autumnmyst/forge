@@ -307,7 +307,7 @@ public final class MatchAnimator {
             } else if (ev instanceof GameEventSpellAbilityCast e) {
                 recordCast(e);
             } else if (ev instanceof GameEventSpellResolving e) {
-                resolving = new Resolution(e.source());
+                resolving = new Resolution(e.source(), isPermanentSpell(e.spell(), e.source()));
             } else if (ev instanceof GameEventSpellResolved e) {
                 resolveCast(e);
             } else if (ev instanceof GameEventSpellRemovedFromStack e) {
@@ -514,6 +514,17 @@ public final class MatchAnimator {
     private static final class Resolution {
         private final CardView source;
         /**
+         * Whether this is a permanent being cast, rather than an ability or a spell that
+         * does something.
+         * <p>
+         * A creature spell resolving does not modify anything - it puts a card onto the
+         * battlefield, and if other permanents change it is because of that card's own
+         * static ability. Nothing travelled, so nothing should be drawn travelling. An
+         * ability, or a sorcery like a mass pump, genuinely does reach out from the stack
+         * and does get a trail.
+         */
+        private final boolean permanentSpell;
+        /**
          * What this resolution has already run a trail to.
          * <p>
          * A spell that targets a player and then damages it is announced three times -
@@ -526,13 +537,29 @@ public final class MatchAnimator {
          */
         private final Set<String> reached = ConcurrentHashMap.newKeySet();
 
-        Resolution(final CardView source) {
+        Resolution(final CardView source, final boolean permanentSpell) {
             this.source = source;
+            this.permanentSpell = permanentSpell;
         }
     }
 
     /** Written and read on the game thread; volatile only so teardown can clear it. */
     private volatile Resolution resolving;
+
+    /**
+     * Whether what is resolving is a permanent being cast, as opposed to an ability or a
+     * spell that does something on its way past.
+     */
+    private static boolean isPermanentSpell(final SpellAbilityView sa, final CardView source) {
+        try {
+            return sa != null && sa.isSpell() && source != null
+                    && source.getCurrentState() != null
+                    && source.getCurrentState().getType() != null
+                    && source.getCurrentState().getType().isPermanent();
+        } catch (final RuntimeException e) {
+            return false;
+        }
+    }
 
     /** Stable key for a trail destination, so the same target cannot be drawn to twice. */
     private static String reachKey(final GameEntityView entity) {
@@ -639,6 +666,26 @@ public final class MatchAnimator {
      * resolution has closed by then.
      */
     private Resolution modScope;
+    /** A permanent was joining the board as this burst began - a static taking hold. */
+    private boolean modEntering;
+    /** A permanent was leaving it - a static letting go. */
+    private boolean modLeaving;
+
+    /**
+     * Whether anything is on its way off the battlefield right now.
+     * <p>
+     * Not simply whether {@code departing} has entries: a land being played is recorded
+     * there too, so that its origin can be measured in hand before the refresh takes it
+     * away, and that is an arrival rather than a departure.
+     */
+    private boolean anyLeavingBattlefield() {
+        for (final ZoneType to : departing.values()) {
+            if (to != ZoneType.Battlefield && to != ZoneType.Stack) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     /**
      * The characteristics each card was last seen with.
@@ -731,6 +778,15 @@ public final class MatchAnimator {
         // counters and icons straight off the live card. Every card in the burst, not
         // just the one that opened it.
         freezeCard(card);
+        // Read before taking the other lock, and while they are still true: whether a
+        // permanent is joining the board or leaving it is what says whether a static
+        // ability is taking hold or letting go.
+        final boolean entering;
+        final boolean leaving;
+        synchronized (this) {
+            entering = !arriving.isEmpty();
+            leaving = anyLeavingBattlefield();
+        }
         final boolean first;
         synchronized (pendingMods) {
             final ModRecord m = pendingMods.computeIfAbsent(card.getId(), k -> new ModRecord(card));
@@ -743,6 +799,8 @@ public final class MatchAnimator {
                 modScope = resolving;
                 modSource = modScope != null ? modScope.source : null;
                 modFromStack = modSource != null;
+                modEntering = entering;
+                modLeaving = leaving;
             }
         }
         if (first) {
@@ -776,6 +834,8 @@ public final class MatchAnimator {
         final CardView source;
         final boolean fromStack;
         final Resolution scope;
+        final boolean entering;
+        final boolean leaving;
         synchronized (pendingMods) {
             modFlushQueued = false;
             if (pendingMods.isEmpty()) {
@@ -785,22 +845,39 @@ public final class MatchAnimator {
             source = modSource;
             fromStack = modFromStack;
             scope = modScope;
+            entering = modEntering;
+            leaving = modLeaving;
             pendingMods.clear();
             modSource = null;
             modScope = null;
+            modEntering = false;
+            modLeaving = false;
         }
 
         // Whether this was an effect being applied or one wearing off. Only an
         // application sweeps a board: something being put onto everything at once is a
         // single act reaching that board, whereas a continuous effect ending is just the
         // board going back to how it was - several cards changing, no act reaching them.
-        // A resolution behind the burst is what tells the two apart, and it is why mass
-        // -1/-1 sweeps while the same creatures reverting at cleanup does not.
-        final boolean applied = scope != null;
+        // So mass -1/-1 sweeps, and the same creatures reverting at cleanup does not.
+        //
+        // Something resolving says an effect was applied. So does a permanent joining the
+        // board, which is how a static ability takes hold - and it is announced after the
+        // spell that put it there has finished resolving, so there is no resolution left
+        // to attribute it to. A permanent leaving says the opposite, and wins: a lord
+        // dying shrinks a whole team without anything having reached them.
+        final boolean applied = (scope != null || entering) && !leaving;
+
+        // Whether anything actually travelled. A trail is for an effect that came from
+        // somewhere else - off the stack, as an ability or as a spell that does something
+        // on its way past. A permanent's own static ability came from the permanent, which
+        // is already sitting on the board in plain view, so there is nowhere to draw from
+        // and the sweep alone says it: Valley Floodcaller's trigger gets a trail, Bria's
+        // static does not.
+        final boolean travelled = applied && scope != null && !scope.permanentSpell;
 
         // The sparks are what the effect did once it arrived, so when a trail is drawn
         // they wait for it, and the sweep goes between the two.
-        final Point origin = applied ? trailOrigin(source, fromStack) : null;
+        final Point origin = travelled ? trailOrigin(source, fromStack) : null;
         final long arriveMs = Math.round(BEAM_MS * BEAM_ARRIVAL);
 
         final AnimationStep step = new AnimationStep("modify");
@@ -824,8 +901,9 @@ public final class MatchAnimator {
         }
 
         long sparkAt = 0L;
-        if (applied && origin != null) {
-            final List<Color> palette = CardColors.of(source, canShow(source));
+        if (applied) {
+            final List<Color> palette = source != null
+                    ? CardColors.of(source, canShow(source)) : CardColors.of(null, false);
             for (final Map.Entry<PlayerView, Integer> e : perController.entrySet()) {
                 if (e.getValue() < BOARD_EFFECT_THRESHOLD) {
                     continue;
@@ -834,16 +912,18 @@ public final class MatchAnimator {
                 if (area == null) {
                     continue;
                 }
+                long burstAt = 0L;
                 // One trail per affected board rather than one per permanent, since what
-                // happened was a single effect reaching that board.
-                if (claimBoardTrail(scope, e.getKey())) {
+                // happened was a single effect reaching that board. Skipped entirely for a
+                // static ability, whose sweep starts straight away.
+                if (origin != null && claimBoardTrail(scope, e.getKey())) {
                     step.add(new BeamAnim(origin,
                             new Point(area.x + area.width / 2, area.y + area.height / 2),
                             palette, 2f, BEAM_MS));
-                    sparkAt = arriveMs;
+                    burstAt = arriveMs;
                 }
-                step.add(new BurstAnim(area, palette, 150, 640).delayedBy(arriveMs));
-                sparkAt = Math.max(sparkAt, arriveMs);
+                step.add(new BurstAnim(area, palette, 150, 640).delayedBy(burstAt));
+                sparkAt = Math.max(sparkAt, burstAt);
             }
         }
 
