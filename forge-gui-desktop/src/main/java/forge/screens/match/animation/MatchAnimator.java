@@ -558,7 +558,7 @@ public final class MatchAnimator {
      */
     private void unstackInOrder(final CastRecord rec, final String label) {
         final int id = rec.stackItemId;
-        FThreads.invokeInEdtLater(() -> lingerStackItem(rec));
+        lingerStackItem(rec);
         queue.enqueue(new AnimationStep(label).then(() -> hideStackItem(id)));
         clock.start();
     }
@@ -1235,7 +1235,12 @@ public final class MatchAnimator {
             // the moment the game takes it off. The game can resolve a whole stack faster
             // than one trail crosses the board, and an entry that vanishes on its way to
             // being shown means a stack that is never visible at all.
-            FThreads.invokeInEdtLater(() -> lingerStackItem(rec));
+            //
+            // Claimed here, on the game thread, and not posted to the EDT: this event is
+            // fired before the entry is taken off the stack, and the removal refresh that
+            // follows would otherwise land in the gap - the entry blinking out and back as
+            // the claim caught up with it.
+            lingerStackItem(rec);
         }
         if (rec == null || e.hasFizzled()) {
             // A fizzled spell never reached anything, so showing it connect would lie -
@@ -1494,6 +1499,13 @@ public final class MatchAnimator {
                 return;
             }
             panel.clearRenderTransform();
+            // Straight back to invisible. Clearing the transform restores the card to
+            // fully opaque, and the fade does not get to set its own starting alpha until
+            // the clock's next tick - so the card was painted once at full strength before
+            // fading up from nothing. With no image loaded yet, which is the common case
+            // for a card that has only just arrived, that one frame is a black card-shaped
+            // hole sitting in the slot it is about to animate into.
+            panel.setRenderAlpha(0f);
             clock.addFree(PanelAnim.fadeIn(panel, 320));
         };
         final AnimationStep step = new AnimationStep("arrive:" + card.getName()).after(reveal);
@@ -2249,7 +2261,14 @@ public final class MatchAnimator {
         }
     }
 
-    /** Keep an entry in the list after the game has removed it from the stack. */
+    /**
+     * Keep an entry in the list after the game has removed it from the stack.
+     * <p>
+     * Called on the game thread, before the removal it is guarding against; only the
+     * repaint goes to the EDT. The claim itself has to be taken first, because the
+     * refresh that draws the entry gone is triggered by the removal and would find
+     * nothing holding it.
+     */
     private void lingerStackItem(final CastRecord rec) {
         if (!isEnabled() || rec.stackItem == null) {
             return;
@@ -2260,7 +2279,7 @@ public final class MatchAnimator {
                 stackLingering.remove(stackLingering.keySet().iterator().next());
             }
         }
-        refreshStack();
+        FThreads.invokeInEdtLater(this::refreshStack);
     }
 
     /** Take an entry out of the list, its resolution having now been played. */
