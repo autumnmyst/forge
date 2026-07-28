@@ -286,6 +286,35 @@ public class AnimationQueueTest {
         assertEquals(log, List.of("reveal"), "a late hook must apply immediately");
     }
 
+    /**
+     * A reservation blocks everything behind it, including the commit-only steps that
+     * build the UI. Nothing filling a reservation may therefore depend on a step queued
+     * after it: an arrival that waited for the zone refresh to create its card panel was
+     * waiting on something waiting on itself, and every arrival stalled for the full
+     * timeout and lost its animation.
+     */
+    @Test
+    public void aReservationBlocksTheCommitStepsBehindIt() {
+        final List<String> log = new ArrayList<>();
+        final AnimationQueue q = new AnimationQueue();
+        final AnimationStep slot = new AnimationStep("arrive").reserved();
+        q.enqueue(slot);
+        q.enqueue(new AnimationStep("buildPanels").after(() -> log.add("panels")));
+
+        for (int i = 0; i < 10; i++) {
+            q.tick(16);
+        }
+        assertTrue(log.isEmpty(), "the refresh that builds panels cannot run first");
+
+        // So the slot has to be fillable from what is already known.
+        slot.add(dummy(50));
+        slot.seal();
+        for (int i = 0; i < 20 && !q.isIdle(); i++) {
+            q.tick(16);
+        }
+        assertEquals(log, List.of("panels"));
+    }
+
     @Test
     public void delayedAnimationsStartLateButStillFinish() {
         final List<String> log = new ArrayList<>();
