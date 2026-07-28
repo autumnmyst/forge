@@ -557,9 +557,10 @@ public final class MatchAnimator {
      * its trail does.
      */
     private void unstackInOrder(final CastRecord rec, final String label) {
-        final int id = rec.stackItemId;
         lingerStackItem(rec);
-        queue.enqueue(new AnimationStep(label).then(() -> hideStackItem(id)));
+        final AnimationStep step = new AnimationStep(label);
+        popsStackEntry(step, rec.stackItemId);
+        queue.enqueue(step);
         clock.start();
     }
 
@@ -1246,9 +1247,9 @@ public final class MatchAnimator {
             // A fizzled spell never reached anything, so showing it connect would lie -
             // but it still has to leave the list, in order, like anything else.
             if (rec != null) {
-                final int fizzled = rec.stackItemId;
-                queue.enqueue(new AnimationStep("fizzle:" + nameOf(rec.source))
-                        .then(() -> hideStackItem(fizzled)));
+                final AnimationStep step = new AnimationStep("fizzle:" + nameOf(rec.source));
+                popsStackEntry(step, rec.stackItemId);
+                queue.enqueue(step);
                 clock.start();
             }
             resolving = null;
@@ -1330,8 +1331,7 @@ public final class MatchAnimator {
         // The entry leaves the list when this step has played, not when the game removed
         // it. For a permanent spell the step is empty and the arrival queued ahead of it
         // is what the player is watching; either way the entry outlasts its own resolution.
-        final int stackItemId = rec.stackItemId;
-        step.then(() -> hideStackItem(stackItemId));
+        popsStackEntry(step, rec.stackItemId);
         // Everything a resolution does comes out of the stack, because that is where the
         // spell or ability is. Its trip out of its source was already shown when it was
         // put there, so repeating that here would tell the same half of the story twice.
@@ -2280,6 +2280,34 @@ public final class MatchAnimator {
             }
         }
         FThreads.invokeInEdtLater(this::refreshStack);
+    }
+
+    /** Beat given to a step that takes an entry off the stack, so pops read one at a time. */
+    private static final long STACK_POP_MS = 120;
+
+    /**
+     * Make a step responsible for taking one entry off the stack when it has played.
+     * <p>
+     * The beat is what keeps the pops apart. A resolution that draws nothing - a pump, a
+     * counter being placed - is an empty step, and the queue plays empty steps back to
+     * back within a single frame rather than stalling the board on pure state changes. So
+     * a trigger that resolved into nothing lost its entry in the same frame as the spell
+     * ahead of it, and two entries vanished together. Holding for a moment says that an
+     * entry leaving the stack is itself something to be seen, whether or not the
+     * resolution had anything to draw.
+     * <p>
+     * Only when there is actually an entry being held for this, and it scales with the
+     * backlog like everything else, so a long stack still pops briskly.
+     */
+    private void popsStackEntry(final AnimationStep step, final int id) {
+        step.then(() -> hideStackItem(id));
+        final boolean showing;
+        synchronized (stackLingering) {
+            showing = stackLingering.containsKey(id);
+        }
+        if (showing) {
+            step.hold(STACK_POP_MS);
+        }
     }
 
     /** Take an entry out of the list, its resolution having now been played. */

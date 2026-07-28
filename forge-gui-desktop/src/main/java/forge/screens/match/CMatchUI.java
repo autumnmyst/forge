@@ -754,9 +754,14 @@ public final class CMatchUI
 
     @Override
     public void setSelectables(final Iterable<CardView> cards, final int min, final int max) {
-        // The player is about to pick things off the board, so the board has to be
-        // showing the truth. Anything still queued jumps to its end state now.
-        animator.skipAll();
+        // The queue is deliberately left alone here, and the prompt appears over a board
+        // that may still be catching up. Cutting the animations short was the safer thing
+        // to do - everything selectable is certainly on screen and certainly clickable -
+        // but it also meant every choice threw away the run of animations leading up to
+        // it, which is exactly the sequence that explains why the choice is being asked
+        // for. The game is blocked waiting for an answer, so the queue drains at its
+        // normal speed while the player reads; a target that has not arrived yet is a
+        // second away, or immediate on the skip hotkey.
         super.setSelectables(cards, min, max);
         // update zones on tabletop and floating zones - non-selectable cards may be rendered differently
         FThreads.invokeInEdtNowOrLater(() -> {
