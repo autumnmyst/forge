@@ -117,6 +117,8 @@ public final class MatchAnimator {
     private static final float IMPACT_TRIGGER = (LUNGE_MS * 0.35f) / IMPACT_MS;
     /** How long a beam takes end to end. */
     private static final long BEAM_MS = 460L;
+    /** A permanent's arrival trail, a little longer since it crosses the whole board. */
+    private static final long ARRIVAL_BEAM_MS = 520L;
     /**
      * Where in a beam its head reaches the destination, as a fraction of its length.
      * Matches {@code BeamAnim.EMIT_FRACTION}: the beam emits over the first part of its
@@ -1210,6 +1212,19 @@ public final class MatchAnimator {
         final AnimationStep step = slot != null
                 ? slot
                 : new AnimationStep("cast:" + (host != null ? host.getName() : "ability"));
+        // Put the spell on the stack as its own trail sets off, rather than leaving it to
+        // the batched refresh at the end of the burst. That refresh covers every event at
+        // once, so a flurry of triggers played all their trails and then appeared on the
+        // stack together; this way the stack fills in one at a time, each entry arriving
+        // with the trail that carries it.
+        step.before(() -> {
+            try {
+                matchUI.getCStack().update();
+            } catch (final RuntimeException ignored) {
+                // The batched refresh will put it right; a missed early update is
+                // cosmetic and must not wedge the queue.
+            }
+        });
         // The origin is worked out when the beam starts rather than now. A permanent's
         // enters-the-battlefield trigger goes on the stack before the permanent has a
         // card panel, so asking at this point gives nothing and the trail was drawn out
@@ -1393,11 +1408,18 @@ public final class MatchAnimator {
         // consumed as its baseline, and the change it was reporting is never shown.
         fingerprints.put(card.getId(), fingerprint(card));
 
-        final AnimationStep step = new AnimationStep("arrive:" + card.getName())
-                .after(() -> {
-                    panel.clearRenderTransform();
-                    clock.addFree(PanelAnim.fadeIn(panel, 320));
-                });
+        // Idempotent, because it is asked for twice: once as the trail lands, and again
+        // when the step ends in case the first never happened. Whichever gets there
+        // first does the work.
+        final Runnable reveal = () -> {
+            if (panel.getRenderAlpha() > 0f) {
+                return;
+            }
+            panel.clearRenderTransform();
+            clock.addFree(PanelAnim.fadeIn(panel, 320));
+        };
+
+        final AnimationStep step = new AnimationStep("arrive:" + card.getName()).after(reveal);
         final Point origin = originFor(from, card);
         final Point dest = centreOf(panel);
         if (TRACE_ARRIVALS) {
@@ -1405,7 +1427,12 @@ public final class MatchAnimator {
                     + " origin=" + origin + " dest=" + dest);
         }
         if (origin != null && dest != null) {
-            step.add(new BeamAnim(origin, dest, CardColors.of(card, canShow(card)), 1f, 520));
+            step.add(new BeamAnim(origin, dest, CardColors.of(card, canShow(card)), 1f, ARRIVAL_BEAM_MS));
+            // As the trail arrives, not once it has finished. A beam spends its last
+            // stretch letting the trailing sparks catch up, and waiting for that left a
+            // visible pause between the effect reaching the slot and the card appearing
+            // in it.
+            step.add(CallbackAnim.at(Math.round(ARRIVAL_BEAM_MS * BEAM_ARRIVAL), reveal));
         }
         queue.enqueueFirst(step);
         clock.start();
