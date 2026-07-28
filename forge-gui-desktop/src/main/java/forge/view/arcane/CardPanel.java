@@ -444,6 +444,13 @@ public class CardPanel extends SkinnedPanel implements CardContainer, IDisposabl
         if (frozenImage != null || card == null || imagePanel == null) {
             return;
         }
+        // Whatever is being held has to be worth holding. A card whose art has not been
+        // fetched yet paints as an empty black frame, and freezing that substitutes the
+        // black frame for the card until something thaws it - far worse than letting the
+        // change this freeze was meant to delay simply show.
+        if (!imagePanel.hasImage()) {
+            return;
+        }
         final int w = getWidth();
         final int h = getHeight();
         if (w <= 0 || h <= 0) {

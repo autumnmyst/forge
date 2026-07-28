@@ -1084,6 +1084,15 @@ public final class MatchAnimator {
             if (panel == null || panel.isVisualFrozen()) {
                 return;
             }
+            // Nothing to hold for a card that has not been shown yet. A planeswalker is
+            // given its loyalty before it enters, so the panel being frozen is the blank
+            // one waiting for its arrival - and the freeze captures exactly that, a black
+            // card, which then stands in for the real one all the way through the fade.
+            // A card that arrives already showing its counters is the right answer anyway:
+            // they were never on screen without them.
+            if (panel.getRenderAlpha() <= 0f) {
+                return;
+            }
             panel.freezeVisual();
             if (panel.isVisualFrozen()) {
                 frozenPanels.add(panel);
