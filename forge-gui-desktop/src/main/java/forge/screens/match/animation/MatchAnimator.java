@@ -2093,10 +2093,24 @@ public final class MatchAnimator {
         // fallback for when the card cannot be copied.
         final CardSnapshot snap = before != null ? before : CardSnapshot.capture(panel, layer);
         final Point destination = snap == null ? null : panelTopLeft(panel);
-        final Anim reflow = destination != null
-                ? OverlayFlight.reflow(panel, snap, destination,
-                        panel.getWidth() / (double) Math.max(1, snap.getBounds().width), 260)
-                : PanelAnim.reflow(panel, dx, dy, scale, 260);
+        final Anim reflow;
+        if (destination != null) {
+            reflow = OverlayFlight.reflow(panel, snap, destination,
+                    panel.getWidth() / (double) Math.max(1, snap.getBounds().width), 260);
+            // Hidden here rather than left to the animation's own first frame. Layout has
+            // already put the panel where it is going, and an animation does not get to
+            // set up until the clock's next tick - so the card was painted once, sitting
+            // finished at the destination, and only then vanished to travel there. The
+            // capture above has to come first, or the copy is of an invisible card.
+            panel.setRenderAlpha(0f);
+            panel.repaint();
+        } else {
+            reflow = PanelAnim.reflow(panel, dx, dy, scale, 260);
+            // Same again for the in-place fallback: displaced now, not a frame later.
+            panel.setRenderOffset(dx, dy);
+            panel.setRenderScale(scale);
+            panel.repaint();
+        }
         runningReflows.put(panel, reflow);
         clock.addFree(reflow);
     }
