@@ -169,6 +169,7 @@ public final class MatchAnimator {
     public MatchAnimator(final CMatchUI matchUI) {
         this.matchUI = matchUI;
         layer.setQueue(queue);
+        clock.setSpeedSource(() -> userSpeed());
         clock.setOnIdle(() -> {
             releaseAllLife();
             // Sparks still waiting for an arrival that never came. Dropping them is right:
@@ -202,7 +203,16 @@ public final class MatchAnimator {
 
     /** Re-read preferences; called when the settings screen changes them. */
     public void refreshPrefs() {
-        clock.setUserSpeed(FModel.getPreferences().getPrefInt(FPref.UI_ANIMATION_SPEED) / 100f);
+        clock.setUserSpeed(userSpeed());
+    }
+
+    private static float userSpeed() {
+        try {
+            final int pct = FModel.getPreferences().getPrefInt(FPref.UI_ANIMATION_SPEED);
+            return pct <= 0 ? 1f : pct / 100f;
+        } catch (final RuntimeException e) {
+            return 1f;
+        }
     }
 
     /**

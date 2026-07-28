@@ -81,9 +81,28 @@ public final class AnimationClock {
         }
     }
 
+    /**
+     * Where the playback rate comes from, sampled each time the clock wakes up.
+     * <p>
+     * Read at the start of a burst rather than every frame, and rather than only once when
+     * the match opens: the setting is on a screen the player can reach mid-match, and a
+     * speed control that does nothing until the next game would be no use.
+     */
+    public void setSpeedSource(final java.util.function.Supplier<Float> speedSource) {
+        this.speedSource = speedSource;
+    }
+
+    private java.util.function.Supplier<Float> speedSource;
+
     /** Begin ticking. Cheap to call repeatedly; the timer ignores a redundant start. */
     public void start() {
         if (!timer.isRunning()) {
+            if (speedSource != null) {
+                final Float speed = speedSource.get();
+                if (speed != null) {
+                    setUserSpeed(speed);
+                }
+            }
             lastTickNanos = System.nanoTime();
             timer.start();
         }
