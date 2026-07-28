@@ -27,7 +27,9 @@ import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.image.BufferedImage;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import javax.swing.JCheckBoxMenuItem;
 import javax.swing.JComponent;
@@ -162,20 +164,53 @@ public class VStack implements IVDoc<CStack> {
         // No need to update the rest unless it's showing
         if (parentCell == null || !parentCell.getSelected().equals(this)) { return; }
 
+        // An entry arriving or leaving refreshes the list, and so does every game update
+        // that touches the stack at all - so most refreshes ask for exactly what is already
+        // drawn. Rebuilding for those is what made a busy stack flicker: each row was a new
+        // component whose card image had to be fetched again, so the whole list blinked
+        // through a frame of empty rows every time anything happened.
+        final List<String> signature = new ArrayList<>(visible.size());
+        for (final StackItemView item : visible) {
+            signature.add(item.getId() + "|" + textFor(item));
+        }
+        if (signature.equals(shownSignature)) {
+            return;
+        }
+        shownSignature = signature;
+
+        // Rows are kept and reused, so an entry that is merely moving down the list as the
+        // ones above it resolve keeps the image it has already loaded.
+        final Map<Integer, StackInstanceTextArea> reusable = new HashMap<>(rows);
+        rows.clear();
         hoveredItem = null;
         scroller.removeAll();
 
         boolean isFirst = true;
         for (final StackItemView item : visible) {
-            final StackInstanceTextArea tar = new StackInstanceTextArea(item);
+            final String text = textFor(item);
+            StackInstanceTextArea tar = reusable.get(item.getId());
+            if (tar == null || !text.equals(tar.getText())) {
+                tar = new StackInstanceTextArea(item, text);
+            } else {
+                // Same entry, freshly read: keep the row, take the new view.
+                tar.retarget(item);
+            }
+            rows.put(item.getId(), tar);
 
             scroller.add(tar, "pushx, growx" + (isFirst ? "" : ", gaptop 2px"));
 
-            //update the Card Picture/Detail when the spell is added to the stack
             if (isFirst) {
                 isFirst = false;
-                controller.getMatchUI().setCard(item.getSourceCard());
+                hoveredItem = tar;
+                //update the Card Picture/Detail when the spell is added to the stack
+                if (item.getId() != shownTopId) {
+                    shownTopId = item.getId();
+                    controller.getMatchUI().setCard(item.getSourceCard());
+                }
             }
+        }
+        if (visible.isEmpty()) {
+            shownTopId = -1;
         }
 
         scroller.revalidate();
@@ -184,17 +219,41 @@ public class VStack implements IVDoc<CStack> {
         SwingUtilities.invokeLater(scroller::scrollToTop);
     }
 
+    /** Rows currently in the list, by entry id, so a refresh can reuse rather than rebuild. */
+    private final Map<Integer, StackInstanceTextArea> rows = new HashMap<>();
+    /** What the list was last built from; an identical refresh does nothing at all. */
+    private List<String> shownSignature = new ArrayList<>();
+    /** Top entry the card detail was last pointed at, so it is not re-set every refresh. */
+    private int shownTopId = -1;
+
+    private String textFor(final StackItemView item) {
+        return (item.isOptionalTrigger() && controller.getMatchUI().isLocalPlayer(item.getActivatingPlayer())
+                ? "(OPTIONAL) " : "") + item.getText();
+    }
+
     @SuppressWarnings("serial")
     public class StackInstanceTextArea extends SkinnedTextArea {
         public static final int PADDING = 3;
         public static final int CARD_WIDTH = 50;
         public static final int CARD_HEIGHT = 70;//Math.round((float)CARD_WIDTH * CardPanel.ASPECT_RATIO);
 
-        private final StackItemView item;
+        private StackItemView item;
         private final CachedCardImage cachedImage;
 
         public StackItemView getItem() {
             return item;
+        }
+
+        /**
+         * Point a reused row at the current reading of the same entry.
+         * <p>
+         * The stack is re-read from the game on every refresh, so the view object for an
+         * entry is replaced even when nothing about it has changed. The row only survives
+         * when its text is identical, but the menu and the targeting arcs should still be
+         * working from the live object rather than the one this row was built with.
+         */
+        void retarget(final StackItemView item0) {
+            item = item0;
         }
 
         @Override
@@ -210,11 +269,8 @@ public class VStack implements IVDoc<CStack> {
             }
         }
 
-        public StackInstanceTextArea(final StackItemView item0) {
+        public StackInstanceTextArea(final StackItemView item0, final String txt) {
             item = item0;
-
-            final String txt = (item.isOptionalTrigger() && controller.getMatchUI().isLocalPlayer(item.getActivatingPlayer())
-                    ? "(OPTIONAL) " : "") + item.getText();
 
             setText(txt);
             setOpaque(true);
@@ -225,14 +281,8 @@ public class VStack implements IVDoc<CStack> {
             setFont(FSkin.getFont());
             setWrapStyleWord(true);
             setMinimumSize(new Dimension(CARD_WIDTH + 2 * PADDING, CARD_HEIGHT + 2 * PADDING));
-            
-            // if the top of the stack is not assigned yet...
-            if (hoveredItem == null)
-            {
-            	// set things up to draw an arc from it...
-                hoveredItem = StackInstanceTextArea.this;
-                controller.getMatchUI().setCard(item.getSourceCard());
-            }
+            // Which row the arcs are drawn from is settled by the caller once the list is
+            // built, because a row that was reused rather than constructed never gets here.
 
             addMouseListener(new MouseAdapter() {
                 @Override

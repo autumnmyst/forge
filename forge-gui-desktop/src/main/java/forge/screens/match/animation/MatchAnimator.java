@@ -2332,9 +2332,17 @@ public final class MatchAnimator {
         return card == null ? "spell" : card.getName();
     }
 
+    /**
+     * Redraw the list, without the tab switch {@code CStack.update()} performs.
+     * <p>
+     * Showing the stack tab is right when the game puts something on the stack, and the
+     * update that announced it has already done so. These refreshes are the animator
+     * spacing that same content out, and doing it once per entry would pull the tab
+     * forward over and over while the player was reading something else.
+     */
     private void refreshStack() {
         try {
-            matchUI.getCStack().update();
+            matchUI.getCStack().getView().updateStack();
         } catch (final RuntimeException ignored) {
             // Cosmetic; the next real refresh will put it right.
         }
