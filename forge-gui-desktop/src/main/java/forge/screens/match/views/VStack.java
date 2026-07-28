@@ -226,6 +226,15 @@ public class VStack implements IVDoc<CStack> {
     /** Top entry the card detail was last pointed at, so it is not re-set every refresh. */
     private int shownTopId = -1;
 
+    /**
+     * The row an entry is drawn in, so an animation can aim at the entry itself rather
+     * than at the top of the list. Null once the entry is no longer displayed.
+     */
+    public JComponent getRow(final int itemId) {
+        final StackInstanceTextArea row = rows.get(itemId);
+        return row != null && row.getParent() != null ? row : null;
+    }
+
     private String textFor(final StackItemView item) {
         return (item.isOptionalTrigger() && controller.getMatchUI().isLocalPlayer(item.getActivatingPlayer())
                 ? "(OPTIONAL) " : "") + item.getText();

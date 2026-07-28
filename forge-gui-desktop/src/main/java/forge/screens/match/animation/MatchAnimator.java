@@ -426,6 +426,8 @@ public final class MatchAnimator {
          * removal spells drew no beam at all and fell through to the catch-all spark.
          */
         private final Map<Integer, Point> targetPoints = new HashMap<>();
+        /** Other stack entries this was aimed at - what a counterspell names. */
+        private final List<Integer> stackTargets = new ArrayList<>(1);
         /** The stack entry this put there, so it can be released if it never resolves. */
         private int stackItemId;
         /**
@@ -513,6 +515,7 @@ public final class MatchAnimator {
         }
         // Held out of the stack list until its trail gets there, so the stack fills in one
         // entry at a time rather than showing everything the game has already pushed.
+        rec.stackTargets.addAll(e.targetStackItems());
         final int stackItemId = si.getId();
         rec.stackItemId = stackItemId;
         rec.stackItem = si;
@@ -554,12 +557,24 @@ public final class MatchAnimator {
         synchronized (pendingCasts) {
             rec = pendingCasts.remove(sa);
         }
+        if (rec == null) {
+            return;
+        }
         // Countered, or otherwise taken off the stack without resolving. It still leaves
         // in queue order rather than the instant the game says so, so a counterspell's
         // trail reaches a stack that still has something on it.
-        if (rec != null) {
-            unstackInOrder(rec, "countered:" + nameOf(rec.source));
+        final Resolution scope = resolving;
+        if (scope != null) {
+            // Something is resolving, and this is what it did - almost always a
+            // counterspell naming this one. Handed to that resolution so the entry goes
+            // when its trail arrives, rather than in a step of its own queued before the
+            // resolution has even been announced, which took it away first and left the
+            // trail arriving at a gap.
+            lingerStackItem(rec);
+            scope.unstacked.add(rec.stackItemId);
+            return;
         }
+        unstackInOrder(rec, "countered:" + nameOf(rec.source));
     }
 
     /**
@@ -614,6 +629,12 @@ public final class MatchAnimator {
          * events arrive, the EDT as the queued steps are built.
          */
         private final Set<String> reached = ConcurrentHashMap.newKeySet();
+        /**
+         * Stack entries this resolution took off the stack - what a counterspell countered.
+         * They leave the list when this resolution's own step has played, so the trail is
+         * seen reaching them first.
+         */
+        private final Set<Integer> unstacked = ConcurrentHashMap.newKeySet();
 
         Resolution(final CardView source, final boolean permanentSpell) {
             this.source = source;
@@ -1362,9 +1383,18 @@ public final class MatchAnimator {
         if (rec == null || e.hasFizzled()) {
             // A fizzled spell never reached anything, so showing it connect would lie -
             // but it still has to leave the list, in order, like anything else.
+            final AnimationStep step = new AnimationStep("fizzle:" + nameOf(rec == null ? null : rec.source));
             if (rec != null) {
-                final AnimationStep step = new AnimationStep("fizzle:" + nameOf(rec.source));
                 popsStackEntry(step, rec.stackItemId);
+            }
+            // Whatever it managed to counter on its way still has to leave, or it would be
+            // held in the list until the queue next ran dry.
+            if (scope != null) {
+                for (final Integer countered : scope.unstacked) {
+                    popsStackEntry(step, countered);
+                }
+            }
+            if (!step.isEmpty() || rec != null || scope != null) {
                 queue.enqueue(step);
                 clock.start();
             }
@@ -1484,6 +1514,27 @@ public final class MatchAnimator {
                 step.add(new BeamAnim(from, to, palette, 1f, 480));
             }
         }
+        // What a counterspell is pointed at is another entry in the list, so the trail runs
+        // down the stack from one row to the other. The entry it names is still displayed
+        // at this point even though the game has taken it away, because a resolution does
+        // not remove an entry from the list until its own step has played - so there is
+        // something there for this to reach.
+        for (final Integer targetId : rec.stackTargets) {
+            if (scope != null && !scope.reached.add("s" + targetId)) {
+                continue;
+            }
+            final Point to = stackRowCentre(targetId);
+            if (to != null) {
+                step.add(new BeamAnim(from, to, palette, 1f, 480));
+            }
+        }
+        // Anything this resolution countered leaves the list now, having been reached.
+        if (scope != null) {
+            for (final Integer countered : scope.unstacked) {
+                popsStackEntry(step, countered);
+            }
+        }
+
         // Nothing else. A resolution draws a trail when it targets something, when it
         // damages or drains a player, when it puts a permanent onto the battlefield or
         // when it covers a board - and each of those is drawn by whichever part of the
@@ -2300,6 +2351,16 @@ public final class MatchAnimator {
 
     /** Roughly one stack entry, for placing the anchor on the topmost row. */
     private static final int STACK_ENTRY_HEIGHT = 76;
+
+    /** The middle of one entry's row in the list, or null if it is not being drawn. */
+    private Point stackRowCentre(final int itemId) {
+        try {
+            final Rectangle row = boundsInLayer(matchUI.getCStack().getView().getRow(itemId));
+            return row == null ? null : new Point(row.x + row.width / 2, row.y + row.height / 2);
+        } catch (final RuntimeException e) {
+            return null;
+        }
+    }
 
     // ------------------------------------------------------------------ stack contents
 
