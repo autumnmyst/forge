@@ -172,11 +172,6 @@ public final class MatchAnimator {
         clock.setSpeedSource(() -> userSpeed());
         clock.setOnIdle(() -> {
             releaseAllLife();
-            // Sparks still waiting for an arrival that never came. Dropping them is right:
-            // the display has caught up, so there is nothing left to explain.
-            synchronized (this) {
-                sparksAwaitingArrival.clear();
-            }
             thawAllCards();
             showAllStackItems();
             // The display has caught up, so damage no longer owns anything's appearance
@@ -232,7 +227,6 @@ public final class MatchAnimator {
         arriving.clear();
         arrivedFrom.clear();
         pendingArrivals.clear();
-        sparksAwaitingArrival.clear();
         awaitingOrigin.clear();
         pendingDamage.clear();
         fingerprints.clear();
@@ -413,9 +407,6 @@ public final class MatchAnimator {
                         pendingArrivals.remove(id, arrival);
                     }
                 });
-                // Anything that changed this card before it was announced as entering has
-                // been waiting for exactly this step.
-                claimHeldSparks(id, arrival);
                 queue.enqueue(arrival);
                 clock.start();
                 FThreads.invokeInEdtLater(() -> claimAwaitingPanel(card, from));
@@ -1007,22 +998,22 @@ public final class MatchAnimator {
         final AnimationStep step = new AnimationStep("modify");
         final Map<PlayerView, Integer> perController = new LinkedHashMap<>();
         final List<ModRecord> visible = new ArrayList<>(mods.size());
-        final List<ModRecord> notLandedYet = new ArrayList<>(0);
         for (final ModRecord m : mods) {
-            // A card can be changed before it is on screen - a planeswalker is given its
-            // loyalty on the way in, and anything entering with counters or under a lord
-            // is in the same position. Sparking now would flash at an empty slot and only
-            // then animate the card turning up, so this waits for it to land. It still
-            // counts towards the sweep below: the effect did reach that board.
-            //
-            // Asked before measuring, not after. A card that has not arrived has nowhere
-            // to be measured to, so testing the position first threw these away as
-            // unplaceable and the wait never happened.
-            final boolean waiting = isAwaitingArrival(m.card);
-            if (!waiting && centreOf(m.card) == null) {
+            final CardPanel panel = findPanel(m.card);
+            if (panel == null || centreOf(panel) == null) {
                 continue;
             }
-            (waiting ? notLandedYet : visible).add(m);
+            // Nothing to spark on a card that is not on screen yet. A planeswalker is
+            // given its loyalty on the way in, and anything entering with counters or
+            // under a lord is in the same position: the card arrives with it already
+            // there, so there is no change for a spark to mark - not before it lands and
+            // not after either. It still counts towards the sweep below, because the
+            // effect did reach that board, and it is thawed in case the freeze caught it.
+            if (panel.getRenderAlpha() <= 0f) {
+                thawCard(m.card);
+            } else {
+                visible.add(m);
+            }
             // A replacement effect firing is about the card it is printed on, not about
             // whatever effect happened to be resolving, so it is never counted towards a
             // board sweep and never takes the effect's colours.
@@ -1077,28 +1068,10 @@ public final class MatchAnimator {
             step.add(CallbackAnim.at(sparkAt, () -> thawCard(m.card)));
         }
 
-        for (final ModRecord m : notLandedYet) {
-            sparkOnceArrived(m);
-        }
-
         if (!step.isEmpty()) {
             queue.enqueue(step);
             clock.start();
         }
-    }
-
-    /** Whether a card is still on its way in and has not been shown on the board yet. */
-    private boolean isAwaitingArrival(final CardView card) {
-        if (card == null) {
-            return false;
-        }
-        synchronized (this) {
-            if (pendingArrivals.containsKey(card.getId())) {
-                return true;
-            }
-        }
-        final CardPanel panel = findPanel(card);
-        return panel != null && panel.getRenderAlpha() <= 0f;
     }
 
     /**
@@ -1147,67 +1120,6 @@ public final class MatchAnimator {
             }
         }
         return findPanel(card);
-    }
-
-    /**
-     * Show a change to a card that has not arrived yet, once it has.
-     * <p>
-     * Hung off the arrival step rather than queued behind it, because which of the two the
-     * game announced first is not fixed - counters go on a planeswalker before it enters,
-     * but the zone change can still reach the queue first. Attaching to a step that has
-     * already played simply runs now, which is the right answer in that case: the card is
-     * on the board.
-     */
-    private void sparkOnceArrived(final ModRecord m) {
-        final AnimationStep arrival;
-        synchronized (this) {
-            arrival = pendingArrivals.get(m.card.getId());
-            if (arrival == null) {
-                // The change was announced before the card's zone change was. A
-                // planeswalker's loyalty is put on as it enters, and the panel can already
-                // exist and be waiting - so there is something to spark and nothing yet to
-                // wait for. Sparking now was the whole bug: it fired before the arrival
-                // step had even been created, let alone played. Held until the arrival
-                // turns up and claimed by it.
-                sparksAwaitingArrival.computeIfAbsent(m.card.getId(), k -> new ArrayList<>(1)).add(m);
-                return;
-            }
-        }
-        arrival.then(sparkFor(m));
-    }
-
-    /**
-     * Sparks recorded for a card whose arrival has not been announced yet, keyed by card.
-     * Claimed by the arrival when it arrives, and dropped if it never does.
-     */
-    private final Map<Integer, List<ModRecord>> sparksAwaitingArrival = new HashMap<>();
-
-    /** Hand any sparks held for this card to the arrival that will show it. */
-    private void claimHeldSparks(final int cardId, final AnimationStep arrival) {
-        final List<ModRecord> held = sparksAwaitingArrival.remove(cardId);
-        if (held == null) {
-            return;
-        }
-        for (final ModRecord m : held) {
-            arrival.then(sparkFor(m));
-        }
-    }
-
-    private Runnable sparkFor(final ModRecord m) {
-        return () -> {
-            final Point at = centreOf(m.card);
-            if (at == null) {
-                thawCard(m.card);
-                return;
-            }
-            final AnimationStep s = new AnimationStep("modify:landed");
-            s.add(m.replacement
-                    ? new ImpactAnim(at, REPLACEMENT_PALETTE, REPLACEMENT_SPARK, 420, 0f)
-                    : new ImpactAnim(at, CardColors.of(m.card, canShow(m.card)), MODIFY_SPARK, 400, 0f));
-            s.then(() -> thawCard(m.card));
-            queue.enqueue(s);
-            clock.start();
-        };
     }
 
     // ------------------------------------------------------------------ player changes
