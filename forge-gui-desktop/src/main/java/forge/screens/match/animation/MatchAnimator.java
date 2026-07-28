@@ -156,6 +156,11 @@ public final class MatchAnimator {
     private final Set<Integer> arriving = new HashSet<>();
     /** Zone each arriving card came out of; null means it was created, i.e. a token. */
     private final Map<Integer, ZoneType> arrivedFrom = new HashMap<>();
+    /**
+     * The queued arrival of each card still on its way in, so a change to a card that has
+     * not landed yet can be shown when it does. Dropped as each one plays.
+     */
+    private final Map<Integer, AnimationStep> pendingArrivals = new HashMap<>();
 
     /** Damage grouped by source, flushed on the next EDT pass. See {@link #flushDamage()}. */
     private final Map<Integer, DamageGroup> pendingDamage = new LinkedHashMap<>();
@@ -211,6 +216,7 @@ public final class MatchAnimator {
         departing.clear();
         arriving.clear();
         arrivedFrom.clear();
+        pendingArrivals.clear();
         awaitingOrigin.clear();
         pendingDamage.clear();
         fingerprints.clear();
@@ -381,7 +387,17 @@ public final class MatchAnimator {
                 // Everything the arrival goes on to trigger is announced after this, so it
                 // queues after this, and the ordering holds however far the game runs
                 // ahead of the display.
-                queue.enqueue(arrivalStep(card, from));
+                final AnimationStep arrival = arrivalStep(card, from);
+                // Kept hold of so anything that happened to this card before it got here
+                // can be hung off its arrival rather than played over an empty slot.
+                final int id = card.getId();
+                pendingArrivals.put(id, arrival);
+                arrival.then(() -> {
+                    synchronized (MatchAnimator.this) {
+                        pendingArrivals.remove(id, arrival);
+                    }
+                });
+                queue.enqueue(arrival);
                 clock.start();
                 FThreads.invokeInEdtLater(() -> claimAwaitingPanel(card, from));
                 if (from == ZoneType.Hand) {
@@ -945,11 +961,17 @@ public final class MatchAnimator {
         final AnimationStep step = new AnimationStep("modify");
         final Map<PlayerView, Integer> perController = new LinkedHashMap<>();
         final List<ModRecord> visible = new ArrayList<>(mods.size());
+        final List<ModRecord> notLandedYet = new ArrayList<>(0);
         for (final ModRecord m : mods) {
             if (centreOf(m.card) == null) {
                 continue;
             }
-            visible.add(m);
+            // A card can be changed before it is on screen - a planeswalker is given its
+            // loyalty on the way in, and anything entering with counters or under a lord
+            // is in the same position. Sparking now would flash at an empty slot and only
+            // then animate the card turning up, so this waits for it to land. It still
+            // counts towards the sweep below: the effect did reach that board.
+            (isAwaitingArrival(m.card) ? notLandedYet : visible).add(m);
             // A replacement effect firing is about the card it is printed on, not about
             // whatever effect happened to be resolving, so it is never counted towards a
             // board sweep and never takes the effect's colours.
@@ -1004,9 +1026,54 @@ public final class MatchAnimator {
             step.add(CallbackAnim.at(sparkAt, () -> thawCard(m.card)));
         }
 
+        for (final ModRecord m : notLandedYet) {
+            sparkOnceArrived(m);
+        }
+
         if (!step.isEmpty()) {
             queue.enqueue(step);
             clock.start();
+        }
+    }
+
+    /** Whether a card has a panel that is still hidden, waiting for its own arrival. */
+    private boolean isAwaitingArrival(final CardView card) {
+        final CardPanel panel = findPanel(card);
+        return panel != null && panel.getRenderAlpha() <= 0f;
+    }
+
+    /**
+     * Show a change to a card that has not arrived yet, once it has.
+     * <p>
+     * Hung off the arrival step rather than queued behind it, because which of the two the
+     * game announced first is not fixed - counters go on a planeswalker before it enters,
+     * but the zone change can still reach the queue first. Attaching to a step that has
+     * already played simply runs now, which is the right answer in that case: the card is
+     * on the board.
+     */
+    private void sparkOnceArrived(final ModRecord m) {
+        final AnimationStep arrival;
+        synchronized (this) {
+            arrival = pendingArrivals.get(m.card.getId());
+        }
+        final Runnable spark = () -> {
+            final Point at = centreOf(m.card);
+            if (at == null) {
+                thawCard(m.card);
+                return;
+            }
+            final AnimationStep s = new AnimationStep("modify:landed");
+            s.add(m.replacement
+                    ? new ImpactAnim(at, REPLACEMENT_PALETTE, REPLACEMENT_SPARK, 420, 0f)
+                    : new ImpactAnim(at, CardColors.of(m.card, canShow(m.card)), MODIFY_SPARK, 400, 0f));
+            s.then(() -> thawCard(m.card));
+            queue.enqueue(s);
+            clock.start();
+        };
+        if (arrival != null) {
+            arrival.then(spark);
+        } else {
+            spark.run();
         }
     }
 
