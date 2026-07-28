@@ -87,25 +87,12 @@ public final class AnimationQueue {
         pending.addAll(rebuilt);
     }
 
-    /**
-     * Put a step at the front, to play before anything already waiting.
-     * <p>
-     * For work that can only be built from inside another step's hook and belongs before
-     * whatever was queued after it. A permanent's arrival is the case: its trail cannot
-     * be aimed until the board refresh has created the card's panel, and that refresh is
-     * itself a step - so the arrival is built during it, while the trigger the permanent
-     * set off is already queued behind. Appending would draw the ability leaving a card
-     * that had not arrived yet.
-     * <p>
-     * Safe precisely because it is called from a hook: the step that was playing has
-     * finished, so the front of the queue is the next thing due and nothing is displaced
-     * that should have come first.
-     */
-    public synchronized void enqueueFirst(final AnimationStep step) {
-        if (step != null) {
-            pending.addFirst(step);
-        }
-    }
+    // Deliberately no way to put a step at the front. There was one, for animations that
+    // could only be built after the step that created what they needed - and it reordered
+    // the queue as soon as the game ran ahead, because a single refresh builds panels for
+    // cards that entered at quite different times, and each insertion jumped the one
+    // before it. Anything that needs to play in event order must be queued in event order
+    // and work out its geometry when it plays; see BeamAnim's supplier constructor.
 
     public synchronized boolean isIdle() {
         return current == null && pending.isEmpty();

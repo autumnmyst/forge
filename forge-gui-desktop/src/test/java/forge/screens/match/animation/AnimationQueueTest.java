@@ -316,24 +316,27 @@ public class AnimationQueueTest {
     }
 
     /**
-     * How an arrival gets ahead of what it triggered without holding a place. The trail
-     * can only be aimed once the refresh has built the card's panel, and by then the
-     * trigger is already queued - so the arrival is inserted at the front from inside
-     * that refresh's own hook.
+     * Steps play in the order they were queued, whatever else is going on. This is the
+     * property arrivals now depend on: an arrival is queued when the card enters and
+     * works out where to draw when it plays, rather than being built later and pushed in
+     * front of the trigger it caused.
      */
     @Test
-    public void aStepInsertedFromAHookPlaysBeforeWhatWasAlreadyQueued() {
+    public void queueOrderIsEventOrderEvenWhenStepsAreQueuedWhilePlaying() {
         final List<String> log = new ArrayList<>();
         final AnimationQueue q = new AnimationQueue();
-        q.enqueue(new AnimationStep("buildPanels")
-                .after(() -> q.enqueueFirst(step("arrive", log, 50))));
+        q.enqueue(step("permanentArrives", log, 50));
         q.enqueue(step("etbTrigger", log, 50));
+        // Queued mid-playback, the way a later event would arrive.
+        q.tick(16);
+        q.enqueue(step("tokenArrives", log, 50));
 
-        for (int i = 0; i < 40 && !q.isIdle(); i++) {
+        for (int i = 0; i < 60 && !q.isIdle(); i++) {
             q.tick(16);
         }
-        assertEquals(log, List.of("arrive:before", "arrive:after",
-                "etbTrigger:before", "etbTrigger:after"));
+        assertEquals(log, List.of("permanentArrives:before", "permanentArrives:after",
+                "etbTrigger:before", "etbTrigger:after",
+                "tokenArrives:before", "tokenArrives:after"));
     }
 
     @Test

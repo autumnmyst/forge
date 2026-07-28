@@ -26,8 +26,11 @@ import java.awt.Point;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.image.BufferedImage;
+import java.util.ArrayList;
+import java.util.List;
 
 import javax.swing.JCheckBoxMenuItem;
+import javax.swing.JComponent;
 import javax.swing.JMenuItem;
 import javax.swing.JPopupMenu;
 import javax.swing.ScrollPaneConstants;
@@ -49,6 +52,7 @@ import forge.gui.framework.IVDoc;
 import forge.interfaces.IGameController;
 import forge.player.AutoYieldStore.TriggerDecision;
 import forge.screens.match.controllers.CDock.ArcState;
+import forge.screens.match.animation.MatchAnimator;
 import forge.screens.match.controllers.CStack;
 import forge.toolbox.FMouseAdapter;
 import forge.toolbox.FScrollPanel;
@@ -103,6 +107,14 @@ public class VStack implements IVDoc<CStack> {
         return parentCell;
     }
 
+    /**
+     * The area entries are listed in, so an animation can aim at the top of the stack -
+     * which is where the next one will appear.
+     */
+    public JComponent getScroller() {
+        return scroller;
+    }
+
     @Override
     public EDocID getDocumentID() {
         return EDocID.REPORT_STACK;
@@ -126,7 +138,22 @@ public class VStack implements IVDoc<CStack> {
         }
 
         final FCollectionView<StackItemView> items = model.getStack();
-        tab.setText(Localizer.getInstance().getMessage("lblStack") + " : " + items.size());
+
+        // Entries whose trail is still travelling are left out, so the stack fills in one
+        // at a time as each arrives rather than showing everything the game has already
+        // pushed. The list itself is still read live - only which of it is ready to be
+        // seen is the animator's business - so the stack cannot drift out of step with
+        // the game, it can only lag it.
+        final MatchAnimator animator = controller.getMatchUI().getAnimator();
+        final List<StackItemView> visible = new ArrayList<>();
+        for (final StackItemView item : (controller.getMatchUI().isNetGame()
+                ? items.threadSafeIterable() : items)) {
+            if (animator == null || animator.isStackItemVisible(item)) {
+                visible.add(item);
+            }
+        }
+
+        tab.setText(Localizer.getInstance().getMessage("lblStack") + " : " + visible.size());
 
         // No need to update the rest unless it's showing
         if (parentCell == null || !parentCell.getSelected().equals(this)) { return; }
@@ -134,10 +161,8 @@ public class VStack implements IVDoc<CStack> {
         hoveredItem = null;
         scroller.removeAll();
 
-        final Iterable<StackItemView> safeItems = controller.getMatchUI().isNetGame()
-                ? items.threadSafeIterable() : items;
         boolean isFirst = true;
-        for (final StackItemView item : safeItems) {
+        for (final StackItemView item : visible) {
             final StackInstanceTextArea tar = new StackInstanceTextArea(item);
 
             scroller.add(tar, "pushx, growx" + (isFirst ? "" : ", gaptop 2px"));

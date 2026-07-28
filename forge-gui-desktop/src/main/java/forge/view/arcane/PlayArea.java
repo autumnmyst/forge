@@ -1054,7 +1054,30 @@ public class PlayArea extends CardPanelContainer implements CardPanelMouseListen
         recalculateCardPanels(model, zone);
     }
 
+    /**
+     * Build panels for cards that have arrived, without removing anything or refreshing
+     * what is already here.
+     * <p>
+     * A card entering play is hidden the moment its panel exists, so creating it early
+     * shows nothing - but it does give the animator somewhere to aim, and lets an arrival
+     * be queued in the order the card actually entered. Left to the deferred refresh, the
+     * panel only appeared after the animation that needed it had been built or had
+     * already played, which is what made arrivals overtake the triggers they caused.
+     * <p>
+     * Removals stay behind the animations, so a creature is still on the board while its
+     * death plays.
+     */
+    public void addArrivedPanels() {
+        FThreads.assertExecutedByEdt(true);
+        recalculateCardPanels(model, zone, true);
+    }
+
     private void recalculateCardPanels(final PlayerView model, final ZoneType zone) {
+        recalculateCardPanels(model, zone, false);
+    }
+
+    private void recalculateCardPanels(final PlayerView model, final ZoneType zone,
+            final boolean additionsOnly) {
         final List<CardView> modelCopy;
         synchronized (model) {
             modelCopy = Lists.newArrayList(model.getCards(zone));
@@ -1065,30 +1088,37 @@ public class PlayArea extends CardPanelContainer implements CardPanelMouseListen
             oldCards.add(cpa.getCard());
         }
 
-        final List<CardView> toDelete = Lists.newArrayList(oldCards);
-        final List<CardView> notToDelete = Lists.newLinkedList();
-        for (final CardView c : modelCopy) {
-            for (final CardView c2 : toDelete) {
-                if (c.getId() == c2.getId()) {
-                    notToDelete.add(c2);
+        boolean removed = false;
+        if (!additionsOnly) {
+            final List<CardView> toDelete = Lists.newArrayList(oldCards);
+            final List<CardView> notToDelete = Lists.newLinkedList();
+            for (final CardView c : modelCopy) {
+                for (final CardView c2 : toDelete) {
+                    if (c.getId() == c2.getId()) {
+                        notToDelete.add(c2);
+                    }
                 }
             }
-        }
-        toDelete.removeAll(notToDelete);
+            toDelete.removeAll(notToDelete);
 
-        if (toDelete.size() == getCardPanels().size()) {
-            clear(false);
-        } else {
-            for (final CardView card : toDelete) {
-                removeCardPanel(getCardPanel(card.getId()),false);
+            if (toDelete.size() == getCardPanels().size()) {
+                clear(false);
+            } else {
+                for (final CardView card : toDelete) {
+                    removeCardPanel(getCardPanel(card.getId()),false);
+                }
             }
-        }
-        for (final CardView card : toDelete) {
-            removeGhosts(card.getId());
+            for (final CardView card : toDelete) {
+                removeGhosts(card.getId());
+            }
+            removed = !toDelete.isEmpty();
         }
 
         final List<CardView> toAdd = new ArrayList<>(modelCopy);
         toAdd.removeAll(oldCards);
+        if (additionsOnly && toAdd.isEmpty()) {
+            return; // nothing arrived, so nothing to lay out and nothing to announce
+        }
 
         final List<CardPanel> newPanels = new ArrayList<>();
         for (final CardView card : toAdd) {
@@ -1099,8 +1129,11 @@ public class PlayArea extends CardPanelContainer implements CardPanelMouseListen
             newPanels.add(placeholder);
         }
 
-        boolean needLayoutRefresh = !newPanels.isEmpty() || !toDelete.isEmpty();
-        for (final CardView card : modelCopy) {
+        boolean needLayoutRefresh = !newPanels.isEmpty() || removed;
+        // Only the cards that just arrived on an additions pass. Refreshing the rest
+        // would apply state the deferred pass is deliberately holding back - a creature
+        // showing the damage that killed it before the blow has landed.
+        for (final CardView card : additionsOnly ? toAdd : modelCopy) {
             if (doUpdateCard(card, true)) {
                 needLayoutRefresh = true;
             }

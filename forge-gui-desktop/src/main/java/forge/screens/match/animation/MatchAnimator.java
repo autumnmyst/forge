@@ -119,6 +119,8 @@ public final class MatchAnimator {
     private static final long BEAM_MS = 460L;
     /** A permanent's arrival trail, a little longer since it crosses the whole board. */
     private static final long ARRIVAL_BEAM_MS = 520L;
+    /** A spell or ability travelling to the stack. */
+    private static final long CAST_BEAM_MS = 420L;
     /**
      * Where in a beam its head reaches the destination, as a fraction of its length.
      * Matches {@code BeamAnim.EMIT_FRACTION}: the beam emits over the first part of its
@@ -163,6 +165,7 @@ public final class MatchAnimator {
         clock.setOnIdle(() -> {
             releaseAllLife();
             thawAllCards();
+            showAllStackItems();
             // The display has caught up, so damage no longer owns anything's appearance
             // and the next change to these cards is a change in its own right.
             damageClaimed.clear();
@@ -211,6 +214,7 @@ public final class MatchAnimator {
         fingerprints.clear();
         stagedLife.clear();
         damageClaimed.clear();
+        stackNotYetShown.clear();
         thawAllCards();
         resolving = null;
         synchronized (pendingMods) {
@@ -363,16 +367,17 @@ public final class MatchAnimator {
                 // trigger has long since queued its own trail and would play first, so
                 // the ability left a card that had not arrived yet.
                 //
-                // Deliberately nothing queued here. An arrival cannot hold a place in the
-                // queue, because holding one blocks the board refresh queued behind it -
-                // and that refresh is what creates the card's panel, which is the only
-                // thing that knows where the card ended up. Reserving made the trail wait
-                // on something waiting on the reservation, so it timed out and was either
-                // lost or aimed at the middle of the battlefield instead of at the card.
+                // Queued here, in the order the card actually entered, and left to work
+                // out where it is going when it plays. Panels for arriving cards are
+                // built as soon as the zone update reaches the UI rather than behind the
+                // deferred refresh, so by the time this step runs the card has a place on
+                // the board even though it has none right now.
                 //
-                // The arrival is built during that refresh instead and put at the front of
-                // the queue, which puts it ahead of anything the arrival itself triggered.
-                // See revealArrival.
+                // Everything the arrival goes on to trigger is announced after this, so it
+                // queues after this, and the ordering holds however far the game runs
+                // ahead of the display.
+                queue.enqueue(arrivalStep(card, from));
+                clock.start();
                 FThreads.invokeInEdtLater(() -> claimAwaitingPanel(card, from));
                 if (from == ZoneType.Hand) {
                     // A land: its origin is the card still sitting in hand, so the hand
@@ -400,6 +405,8 @@ public final class MatchAnimator {
          * removal spells drew no beam at all and fell through to the catch-all spark.
          */
         private final Map<Integer, Point> targetPoints = new HashMap<>();
+        /** The stack entry this put there, so it can be released if it never resolves. */
+        private int stackItemId;
 
         CastRecord(final CardView source) {
             this.source = source;
@@ -469,8 +476,15 @@ public final class MatchAnimator {
             queue.enqueue(slot);
             clock.start();
         }
+        // Held out of the stack list until its trail gets there, so the stack fills in one
+        // entry at a time rather than showing everything the game has already pushed.
+        final int stackItemId = si.getId();
+        rec.stackItemId = stackItemId;
+        if (isEnabled()) {
+            stackNotYetShown.add(stackItemId);
+        }
         FThreads.invokeInEdtLater(() -> {
-            enqueueOntoStack(host, activator, slot);
+            enqueueOntoStack(host, activator, slot, stackItemId);
             // Measure the targets now, while they are all still on the board.
             for (final CardView c : rec.cardTargets) {
                 final Point at = centreOf(c);
@@ -499,8 +513,15 @@ public final class MatchAnimator {
         if (sa == null) {
             return;
         }
+        final CastRecord rec;
         synchronized (pendingCasts) {
-            pendingCasts.remove(sa);
+            rec = pendingCasts.remove(sa);
+        }
+        // Countered, or otherwise taken off the stack without resolving. Its trail may
+        // never play, and an entry held back for a trail that never comes would be missing
+        // from the list for as long as the stack stayed busy.
+        if (rec != null) {
+            FThreads.invokeInEdtLater(() -> showStackItem(rec.stackItemId));
         }
     }
 
@@ -1171,6 +1192,13 @@ public final class MatchAnimator {
         // Read before the scope closes, so the targets drawn below dedup against whatever
         // the resolution itself already drew while it was running.
         final Resolution scope = resolving;
+        if (rec != null) {
+            // It is leaving the stack, so there is nothing left to hold back. Without this
+            // an entry whose trail was still travelling when it resolved would stay in the
+            // held set, and the safety release on idle would be the only thing to clear it.
+            final int stackItemId = rec.stackItemId;
+            FThreads.invokeInEdtLater(() -> showStackItem(stackItemId));
+        }
         if (rec == null || e.hasFizzled()) {
             // A fizzled spell never reached anything, so showing it connect would lie.
             resolving = null;
@@ -1208,23 +1236,19 @@ public final class MatchAnimator {
      *             null to simply append.
      */
     private void enqueueOntoStack(final CardView host, final PlayerView activator,
-            final AnimationStep slot) {
+            final AnimationStep slot, final int stackItemId) {
         final AnimationStep step = slot != null
                 ? slot
                 : new AnimationStep("cast:" + (host != null ? host.getName() : "ability"));
-        // Put the spell on the stack as its own trail sets off, rather than leaving it to
-        // the batched refresh at the end of the burst. That refresh covers every event at
-        // once, so a flurry of triggers played all their trails and then appeared on the
-        // stack together; this way the stack fills in one at a time, each entry arriving
-        // with the trail that carries it.
-        step.before(() -> {
-            try {
-                matchUI.getCStack().update();
-            } catch (final RuntimeException ignored) {
-                // The batched refresh will put it right; a missed early update is
-                // cosmetic and must not wedge the queue.
-            }
-        });
+        // The entry appears when its trail gets there, the way a permanent does. Doing it
+        // at the start of the step instead just refreshed the whole stack, which paints
+        // every entry the game has pushed - so a flurry of triggers still arrived in one
+        // lump, whatever order their trails played in.
+        step.add(CallbackAnim.at(Math.round(CAST_BEAM_MS * BEAM_ARRIVAL),
+                () -> showStackItem(stackItemId)));
+        // And unconditionally at the end, so an entry cannot be left out of the list
+        // because its step was cut short.
+        step.then(() -> showStackItem(stackItemId));
         // The origin is worked out when the beam starts rather than now. A permanent's
         // enters-the-battlefield trigger goes on the stack before the permanent has a
         // card panel, so asking at this point gives nothing and the trail was drawn out
@@ -1236,7 +1260,7 @@ public final class MatchAnimator {
                     return at != null ? at : avatarCentre(activator);
                 },
                 this::stackAnchor,
-                CardColors.of(host, canShow(host)), 1f, 420));
+                CardColors.of(host, canShow(host)), 1f, CAST_BEAM_MS));
         if (slot != null) {
             slot.seal();
         } else {
@@ -1369,22 +1393,10 @@ public final class MatchAnimator {
     private static final boolean TRACE_ARRIVALS = false;
 
     /**
-     * Draw a permanent arriving and bring it into view when the trail lands.
-     * <p>
-     * Built here, from inside the board refresh that created the panel, because this is
-     * the first moment the card's place on the battlefield is known - and aiming at the
-     * card is the whole point of the trail. Put at the front of the queue so it still
-     * plays before whatever the arrival triggered, which was queued while the card was
-     * entering.
+     * A panel has just been built for a card that is entering play: hide it, so nothing
+     * shows before the arrival step queued when the card entered gets to reveal it.
      */
     private void revealArrival(final CardPanel panel, final CardView card, final ZoneType from) {
-        // Hidden here and now, not when the step reaches the front of the queue. The
-        // panel is made visible by the zone refresh on a later EDT pass, so anything
-        // later than this lets a frame or two of the card through - it appeared, vanished
-        // again, then animated.
-        panel.setRenderAlpha(0f);
-        panel.repaint();
-
         // A card must never be left invisible because an animation did not run. This runs
         // regardless and is harmless when the reveal below got there first.
         clock.addFree(new Anim(5000) {
@@ -1408,34 +1420,42 @@ public final class MatchAnimator {
         // consumed as its baseline, and the change it was reporting is never shown.
         fingerprints.put(card.getId(), fingerprint(card));
 
+        // Nothing queued here: the arrival was queued when the card entered, which is the
+        // only position that keeps it ahead of whatever the arrival triggered. All this
+        // has to do is make sure the card is not visible before that step reveals it.
+        panel.setRenderAlpha(0f);
+        panel.repaint();
+    }
+
+    /**
+     * The step that carries a permanent onto the battlefield, built when it enters.
+     * <p>
+     * Both ends are resolved when the step plays rather than now, because the card has no
+     * panel yet - it is created by the zone update a moment later. That is the whole
+     * reason this can be queued in event order at all: nothing about it needs to be known
+     * until it is drawn.
+     */
+    private AnimationStep arrivalStep(final CardView card, final ZoneType from) {
         // Idempotent, because it is asked for twice: once as the trail lands, and again
-        // when the step ends in case the first never happened. Whichever gets there
-        // first does the work.
+        // when the step ends in case the first never happened.
         final Runnable reveal = () -> {
-            if (panel.getRenderAlpha() > 0f) {
+            final CardPanel panel = findPanel(card);
+            if (panel == null || panel.getRenderAlpha() > 0f) {
                 return;
             }
             panel.clearRenderTransform();
             clock.addFree(PanelAnim.fadeIn(panel, 320));
         };
-
         final AnimationStep step = new AnimationStep("arrive:" + card.getName()).after(reveal);
-        final Point origin = originFor(from, card);
-        final Point dest = centreOf(panel);
-        if (TRACE_ARRIVALS) {
-            System.out.println("[anim] arrival " + card.getName()
-                    + " origin=" + origin + " dest=" + dest);
-        }
-        if (origin != null && dest != null) {
-            step.add(new BeamAnim(origin, dest, CardColors.of(card, canShow(card)), 1f, ARRIVAL_BEAM_MS));
-            // As the trail arrives, not once it has finished. A beam spends its last
-            // stretch letting the trailing sparks catch up, and waiting for that left a
-            // visible pause between the effect reaching the slot and the card appearing
-            // in it.
-            step.add(CallbackAnim.at(Math.round(ARRIVAL_BEAM_MS * BEAM_ARRIVAL), reveal));
-        }
-        queue.enqueueFirst(step);
-        clock.start();
+        step.add(new BeamAnim(
+                () -> originFor(from, card),
+                () -> centreOf(findPanel(card)),
+                CardColors.of(card, canShow(card)), 1f, ARRIVAL_BEAM_MS));
+        // As the trail arrives, not once it has finished. A beam spends its last stretch
+        // letting the trailing sparks catch up, and waiting for that left a visible pause
+        // between the effect reaching the slot and the card appearing in it.
+        step.add(CallbackAnim.at(Math.round(ARRIVAL_BEAM_MS * BEAM_ARRIVAL), reveal));
+        return step;
     }
 
     // ------------------------------------------------------------------ mana
@@ -2049,9 +2069,19 @@ public final class MatchAnimator {
 
     // ------------------------------------------------------------------ geometry
 
-    /** Where a resolving spell's effects originate: the stack it is resolving off. */
+    /**
+     * Where a resolving spell's effects originate, and where a new one lands: the top of
+     * the stack list, since that is the end things are added to and taken from.
+     */
     private Point stackAnchor() {
         try {
+            final Rectangle listed = boundsInLayer(matchUI.getCStack().getView().getScroller());
+            if (listed != null && listed.width > 0) {
+                // Half an entry down from the top, so the trail ends on the first row
+                // rather than on the border above it.
+                return new Point(listed.x + listed.width / 2,
+                        listed.y + Math.min(STACK_ENTRY_HEIGHT / 2, listed.height / 2));
+            }
             final Rectangle bounds = boundsInLayer(matchUI.getCStack().getView().getParentCell());
             if (bounds != null && bounds.width > 0) {
                 return new Point(bounds.x + bounds.width / 2, bounds.y + Math.min(90, bounds.height / 2));
@@ -2060,6 +2090,49 @@ public final class MatchAnimator {
             // The stack panel may not be laid out yet.
         }
         return new Point(layer.getWidth() / 2, layer.getHeight() / 3);
+    }
+
+    /** Roughly one stack entry, for placing the anchor on the topmost row. */
+    private static final int STACK_ENTRY_HEIGHT = 76;
+
+    // ------------------------------------------------------------------ stack contents
+
+    /**
+     * Stack entries the game has pushed but whose trail has not arrived yet.
+     * <p>
+     * The stack view still reads the real stack; this only says which of it has been
+     * shown. Holding back a whole snapshot instead would let the display disagree with
+     * the game about what is on the stack, whereas the worst this can do is lag it - and
+     * anything still held when the queue empties is released.
+     */
+    private final Set<Integer> stackNotYetShown = ConcurrentHashMap.newKeySet();
+
+    /** Whether this entry's trail has landed and it may be drawn. */
+    public boolean isStackItemVisible(final StackItemView item) {
+        return item == null || !isEnabled() || !stackNotYetShown.contains(item.getId());
+    }
+
+    /** Show an entry, once the trail that carried it has arrived. */
+    private void showStackItem(final int id) {
+        if (stackNotYetShown.remove(id)) {
+            refreshStack();
+        }
+    }
+
+    private void refreshStack() {
+        try {
+            matchUI.getCStack().update();
+        } catch (final RuntimeException ignored) {
+            // Cosmetic; the next real refresh will put it right.
+        }
+    }
+
+    /** Release every held entry. Called when the display has caught up with the game. */
+    private void showAllStackItems() {
+        if (!stackNotYetShown.isEmpty()) {
+            stackNotYetShown.clear();
+            refreshStack();
+        }
     }
 
     private boolean canShow(final CardView card) {
