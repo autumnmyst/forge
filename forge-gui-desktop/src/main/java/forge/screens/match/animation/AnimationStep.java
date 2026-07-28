@@ -4,6 +4,8 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
+import org.tinylog.Logger;
+
 /**
  * One entry in the {@link AnimationQueue}: the motion that depicts a single game
  * event, bracketed by the UI state changes that event actually causes.
@@ -71,6 +73,10 @@ public final class AnimationStep {
 
     /** UI change applied once every animation in the step has finished. */
     public AnimationStep after(final Runnable r) {
+        if (played) {
+            runNow(r);
+            return this;
+        }
         this.after = r;
         return this;
     }
@@ -86,12 +92,43 @@ public final class AnimationStep {
         if (r == null) {
             return this;
         }
+        if (played) {
+            runNow(r);
+            return this;
+        }
         final Runnable existing = after;
         after = existing == null ? r : () -> {
             existing.run();
             r.run();
         };
         return this;
+    }
+
+    /**
+     * Whether this step's consequences have already been applied.
+     * <p>
+     * A reservation the queue gave up waiting for is played empty, and whatever was going
+     * to fill it arrives afterwards. Its animations are simply lost, which is the accepted
+     * cost - but its state change is not optional, and attaching it to a step that has
+     * been and gone used to drop it silently. That is how a card entering play could end
+     * up permanently invisible: the reveal was the hook nobody ever ran.
+     */
+    private volatile boolean played;
+
+    /** Called by the queue once the {@code after} hook has run. */
+    void markPlayed() {
+        played = true;
+    }
+
+    private void runNow(final Runnable r) {
+        if (r == null) {
+            return;
+        }
+        try {
+            r.run();
+        } catch (final Exception e) {
+            Logger.error(e, "Animation step '" + label + "' failed applying a late change");
+        }
     }
 
     /** Extra dwell after the animations finish, so back-to-back events stay readable. */
@@ -124,7 +161,7 @@ public final class AnimationStep {
     public long getTotalMs() {
         long longest = 0L;
         for (final Anim a : anims) {
-            longest = Math.max(longest, a.getDurationMs());
+            longest = Math.max(longest, a.getTotalMs());
         }
         return longest + holdMs;
     }

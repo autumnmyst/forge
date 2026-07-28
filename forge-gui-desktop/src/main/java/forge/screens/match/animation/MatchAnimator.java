@@ -104,6 +104,26 @@ public final class MatchAnimator {
      * rather than as the attacker sets off.
      */
     private static final float IMPACT_TRIGGER = (LUNGE_MS * 0.35f) / IMPACT_MS;
+    /** How long a beam takes end to end. */
+    private static final long BEAM_MS = 460L;
+    /**
+     * Where in a beam its head reaches the destination, as a fraction of its length.
+     * Matches {@code BeamAnim.EMIT_FRACTION}: the beam emits over the first part of its
+     * run and spends the rest letting the last sparks land, so the effect arrives well
+     * before the animation is over.
+     */
+    private static final float BEAM_ARRIVAL = 0.55f;
+
+    /**
+     * Hold an animation back so it fires when the effect reaches it, tolerating a null.
+     * <p>
+     * The nulls come from the flinch helpers, which return one when the subject is not on
+     * screen; threading the delay through every call site instead would repeat that check
+     * everywhere.
+     */
+    private static Anim delayed(final Anim anim, final long delayMs) {
+        return anim == null ? null : anim.delayedBy(delayMs);
+    }
 
     private final CMatchUI matchUI;
     private final AnimationLayer layer = new AnimationLayer();
@@ -127,7 +147,13 @@ public final class MatchAnimator {
     public MatchAnimator(final CMatchUI matchUI) {
         this.matchUI = matchUI;
         layer.setQueue(queue);
-        clock.setOnIdle(this::releaseAllLife);
+        clock.setOnIdle(() -> {
+            releaseAllLife();
+            thawAllCards();
+            // Any slot still held when the queue runs dry was force-sealed and played
+            // without ever being filled, so the reference is dead weight.
+            arrivalSlots.clear();
+        });
     }
 
     public JPanel getPanel() {
@@ -171,6 +197,8 @@ public final class MatchAnimator {
         pendingDamage.clear();
         fingerprints.clear();
         stagedLife.clear();
+        arrivalSlots.clear();
+        thawAllCards();
         resolving = null;
         synchronized (pendingMods) {
             pendingMods.clear();
@@ -253,8 +281,13 @@ public final class MatchAnimator {
         try {
             if (ev instanceof GameEventCardDamaged e) {
                 // Read here, on the game thread as the blow lands, not at flush time.
-                recordDamage(e.source(), e.card(), null, e.amount(),
-                        e.source() != null && e.source().isAttacking());
+                // Blocking counts as combat just as much as attacking does: this event
+                // carries no combat flag, and testing only for attacking meant a
+                // blocker's damage was taken for a spell's and drawn as a beam crawling
+                // back across a gap the blocker never crossed.
+                final CardView src = e.source();
+                recordDamage(src, e.card(), null, e.amount(),
+                        src != null && (src.isAttacking() || src.isBlocking()));
             } else if (ev instanceof GameEventPlayerDamaged e) {
                 // This one states outright whether it was combat damage.
                 recordDamage(e.source(), null, e.target(), e.amount(), e.combat());
@@ -310,13 +343,22 @@ public final class MatchAnimator {
             if (to == ZoneType.Battlefield) {
                 arriving.add(card.getId());
                 arrivedFrom.put(card.getId(), from);
-                // Deliberately no queue reservation here. Reserving a slot works for a
-                // resolution, which always fills it, but an arrival has several paths
-                // that may not - and a reservation the queue gives up on has already
-                // played by the time it is filled, so the reveal attached to it never
-                // runs and the card stays invisible. An ETB trigger occasionally beating
-                // its own creature on screen is a far better outcome than a lost card.
+                // Claim the arrival's place in the queue now, on the game thread, while
+                // the card is only just entering. Its own animation cannot be built until
+                // a panel exists, which happens on a later EDT pass and behind a deferred
+                // zone refresh - by which time the permanent's enters-the-battlefield
+                // trigger has long since queued its own trail and would play first, so
+                // the ability left a card that had not arrived yet.
                 //
+                // This was tried before and made cards permanently invisible, because a
+                // reservation the queue gave up on had already played by the time the
+                // reveal was attached to it. That is fixed at the source now: a hook
+                // attached to a step that has been and gone applies itself immediately,
+                // so the worst a lost reservation costs is the beam.
+                final AnimationStep slot = new AnimationStep("arrive:" + card.getName()).reserved();
+                arrivalSlots.put(card.getId(), slot);
+                queue.enqueue(slot);
+                clock.start();
                 // The panel may already exist - see awaitZoneChange. Settle it on the EDT,
                 // which is where panels may be touched.
                 FThreads.invokeInEdtLater(() -> claimAwaitingPanel(card, from));
@@ -391,8 +433,17 @@ public final class MatchAnimator {
         // cannot tell, and it happens once, here, at cast time.
         final CardView host = si.getSourceCard();
         final PlayerView activator = si.getActivatingPlayer();
+        // Claimed on the game thread, before the EDT can queue anything else. The cost of
+        // an activated ability is paid before the ability reaches the stack, so a
+        // planeswalker's loyalty counters are announced ahead of this event; without a
+        // slot held here the loyalty had already changed by the time the trail explaining
+        // it set off.
+        final AnimationStep slot = new AnimationStep(
+                "cast:" + (host != null ? host.getName() : "ability")).reserved();
+        queue.enqueue(slot);
+        clock.start();
         FThreads.invokeInEdtLater(() -> {
-            enqueueOntoStack(host, activator);
+            enqueueOntoStack(host, activator, true, slot);
             // Measure the targets now, while they are all still on the board.
             for (final CardView c : rec.cardTargets) {
                 final Point at = centreOf(c);
@@ -591,7 +642,8 @@ public final class MatchAnimator {
             }
             return s.getPower() + "/" + s.getToughness()
                     + "|" + s.getLoyalty() + "|" + s.getDefense()
-                    + "|" + s.getType() + "|" + s.getKeywords().hashCode();
+                    + "|" + s.getType() + "|" + s.getKeywords().hashCode()
+                    + "|" + card.getClassLevel();
         } catch (final RuntimeException e) {
             // A card mid-transform can report inconsistently; treat it as unchanged
             // rather than sparking on the inconsistency.
@@ -622,6 +674,11 @@ public final class MatchAnimator {
                 // First sight of this card, so there is nothing it can have changed from.
                 // Without this every permanent any static ability touches would spark the
                 // first time it was mentioned, on top of its own arrival.
+                //
+                // Cards on the battlefield are given their baseline when they arrive
+                // rather than being left to fall in here, which is what made continuous
+                // effects spark so unevenly: the first event naming a card was often the
+                // one that changed it, and that change was the one being swallowed.
                 return;
             }
         } else {
@@ -644,20 +701,28 @@ public final class MatchAnimator {
             // would otherwise flash twice in two different colours for one blow.
             return;
         }
+        // Held as the change is announced, not when its spark is built, because the panel
+        // repaints every frame while anything on the board is animating and paints its
+        // counters and icons straight off the live card. Every card in the burst, not
+        // just the one that opened it.
+        freezeCard(card);
+        final boolean first;
         synchronized (pendingMods) {
             final ModRecord m = pendingMods.computeIfAbsent(card.getId(), k -> new ModRecord(card));
             m.replacement |= replacement;
-            if (modFlushQueued) {
-                return;
+            first = !modFlushQueued;
+            if (first) {
+                modFlushQueued = true;
+                // The first of a burst decides where the burst's trail comes from, while
+                // the resolution that caused it is still open. By flush time it has closed.
+                modScope = resolving;
+                modSource = modScope != null ? modScope.source : null;
+                modFromStack = modSource != null;
             }
-            modFlushQueued = true;
-            // The first of a burst decides where the burst's trail comes from, while the
-            // resolution that caused it is still open. By flush time it has closed.
-            modScope = resolving;
-            modSource = modScope != null ? modScope.source : null;
-            modFromStack = modSource != null;
         }
-        FThreads.invokeInEdtLater(this::flushMods);
+        if (first) {
+            FThreads.invokeInEdtLater(this::flushMods);
+        }
     }
 
     /** Whether this card is among the victims of the damage burst still being collected. */
@@ -697,45 +762,75 @@ public final class MatchAnimator {
             modScope = null;
         }
 
+        // Whether this was an effect being applied or one wearing off. Only an
+        // application sweeps a board: something being put onto everything at once is a
+        // single act reaching that board, whereas a continuous effect ending is just the
+        // board going back to how it was - several cards changing, no act reaching them.
+        // A resolution behind the burst is what tells the two apart, and it is why mass
+        // -1/-1 sweeps while the same creatures reverting at cleanup does not.
+        final boolean applied = scope != null;
+
+        // The sparks are what the effect did once it arrived, so when a trail is drawn
+        // they wait for it, and the sweep goes between the two.
+        final Point origin = applied ? trailOrigin(source, fromStack) : null;
+        final long arriveMs = Math.round(BEAM_MS * BEAM_ARRIVAL);
+
         final AnimationStep step = new AnimationStep("modify");
         final Map<PlayerView, Integer> perController = new LinkedHashMap<>();
+        final List<ModRecord> visible = new ArrayList<>(mods.size());
         for (final ModRecord m : mods) {
-            final Point at = centreOf(m.card);
-            if (at == null) {
+            if (centreOf(m.card) == null) {
                 continue;
             }
+            visible.add(m);
             // A replacement effect firing is about the card it is printed on, not about
             // whatever effect happened to be resolving, so it is never counted towards a
             // board sweep and never takes the effect's colours.
             if (m.replacement) {
-                step.add(new ImpactAnim(at, REPLACEMENT_PALETTE, 1.6f, 420, 0f));
                 continue;
             }
-            step.add(new ImpactAnim(at, CardColors.of(m.card, canShow(m.card)), 1.4f, 400, 0f));
             final PlayerView controller = m.card.getController();
             if (controller != null) {
                 perController.merge(controller, 1, Integer::sum);
             }
         }
 
-        for (final Map.Entry<PlayerView, Integer> e : perController.entrySet()) {
-            if (e.getValue() < BOARD_EFFECT_THRESHOLD) {
+        long sparkAt = 0L;
+        if (applied && origin != null) {
+            final List<Color> palette = CardColors.of(source, canShow(source));
+            for (final Map.Entry<PlayerView, Integer> e : perController.entrySet()) {
+                if (e.getValue() < BOARD_EFFECT_THRESHOLD) {
+                    continue;
+                }
+                final Rectangle area = battlefieldBounds(e.getKey());
+                if (area == null) {
+                    continue;
+                }
+                // One trail per affected board rather than one per permanent, since what
+                // happened was a single effect reaching that board.
+                if (claimBoardTrail(scope, e.getKey())) {
+                    step.add(new BeamAnim(origin,
+                            new Point(area.x + area.width / 2, area.y + area.height / 2),
+                            palette, 2f, BEAM_MS));
+                    sparkAt = arriveMs;
+                }
+                step.add(new BurstAnim(area, palette, 150, 640).delayedBy(arriveMs));
+                sparkAt = Math.max(sparkAt, arriveMs);
+            }
+        }
+
+        for (final ModRecord m : visible) {
+            final Point at = centreOf(m.card);
+            if (at == null) {
                 continue;
             }
-            final Rectangle area = battlefieldBounds(e.getKey());
-            if (area == null) {
-                continue;
-            }
-            final List<Color> palette = source != null
-                    ? CardColors.of(source, canShow(source)) : CardColors.of(null, false);
-            step.add(new BurstAnim(area, palette, 150, 640));
-            // One trail per affected board rather than one per permanent, since what
-            // happened was a single effect reaching that board.
-            final Point origin = trailOrigin(source, fromStack);
-            final Point dest = new Point(area.x + area.width / 2, area.y + area.height / 2);
-            if (origin != null && claimBoardTrail(scope, e.getKey())) {
-                step.add(new BeamAnim(origin, dest, palette, 2f, 480));
-            }
+            step.add(m.replacement
+                    ? new ImpactAnim(at, REPLACEMENT_PALETTE, 1.6f, 420, 0f).delayedBy(sparkAt)
+                    : new ImpactAnim(at, CardColors.of(m.card, canShow(m.card)), 1.4f, 400, 0f)
+                            .delayedBy(sparkAt));
+            // The card was frozen when its change was announced; the spark is the moment
+            // it is allowed to show what it became.
+            step.add(CallbackAnim.at(sparkAt, () -> thawCard(m.card)));
         }
 
         if (!step.isEmpty()) {
@@ -758,25 +853,98 @@ public final class MatchAnimator {
             return;
         }
         final int lifeDelta = newLife - oldLife;
-        if (lifeDelta != 0) {
-            stageLifeTotal(player, oldLife, newLife);
-        }
         final Resolution r = resolving;
-        if (r == null || !claimTrail(player)) {
+        final boolean drawsTrail = r != null && claimTrail(player);
+        if (lifeDelta != 0) {
+            // The trail, when there is one, carries the number with it. Staging it
+            // separately put the release step in the queue before the trail was even
+            // built, so life gained appeared instantly while its beam was still on its
+            // way - the opposite of how damage read.
+            stageLifeTotal(player, oldLife, newLife, drawsTrail);
+        }
+        if (!drawsTrail) {
             return;
         }
         final CardView source = r.source;
         FThreads.invokeInEdtLater(() -> {
             final Point from = stackAnchor();
             final Point to = avatarCentre(player);
-            if (from == null || to == null) {
-                return;
+            final AnimationStep step = new AnimationStep("player:" + player.getName());
+            if (from != null && to != null) {
+                final List<Color> palette = CardColors.of(source, canShow(source));
+                step.add(new BeamAnim(from, to, palette,
+                        Math.min(6, 1 + Math.abs(lifeDelta)), BEAM_MS));
+                step.add(CallbackAnim.at(Math.round(BEAM_MS * BEAM_ARRIVAL),
+                        () -> setStagedLife(player, newLife)));
+            } else {
+                // Nowhere to draw between, but the number must still be let go of.
+                step.then(() -> setStagedLife(player, newLife));
             }
-            final List<Color> palette = CardColors.of(source, canShow(source));
-            queue.enqueue(new AnimationStep("player:" + player.getName())
-                    .add(new BeamAnim(from, to, palette, Math.min(6, 1 + Math.abs(lifeDelta)), 480)));
+            queue.enqueue(step);
             clock.start();
         });
+    }
+
+    // ------------------------------------------------------------------ card visuals
+
+    /**
+     * Cards whose appearance is being held back until the effect changing them arrives.
+     * <p>
+     * Tracked here as well as on the panel so that every freeze can be lifted at once
+     * when the display catches up, in the same way life totals are. A card left frozen
+     * would show a stale board for the rest of the match, which is far worse than an
+     * effect landing a moment early.
+     */
+    private final Set<CardPanel> frozenPanels = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Hold a card looking as it does now.
+     * <p>
+     * Called as the change is announced rather than when its animation is built, because
+     * the panel repaints continuously while anything else on the board is animating and
+     * would otherwise show the new counters and icons within a frame.
+     */
+    private void freezeCard(final CardView card) {
+        if (card == null || !isEnabled()) {
+            return;
+        }
+        FThreads.invokeInEdtNowOrLater(() -> {
+            final CardPanel panel = findPanel(card);
+            if (panel == null || panel.isVisualFrozen()) {
+                return;
+            }
+            panel.freezeVisual();
+            if (panel.isVisualFrozen()) {
+                frozenPanels.add(panel);
+            }
+        });
+    }
+
+    /** Show a card as it really is again. Safe to call for a card that was never frozen. */
+    private void thawCard(final CardView card) {
+        final CardPanel panel = findPanel(card);
+        if (panel != null) {
+            thawPanel(panel);
+        }
+    }
+
+    private void thawPanel(final CardPanel panel) {
+        frozenPanels.remove(panel);
+        panel.thawVisual();
+    }
+
+    /**
+     * Lift every freeze. Runs when the queue empties, at which point the display has
+     * caught up with the game by definition, so a release that never arrived cannot leave
+     * a card showing an old face for the rest of the match.
+     */
+    private void thawAllCards() {
+        if (frozenPanels.isEmpty()) {
+            return;
+        }
+        for (final CardPanel p : new ArrayList<>(frozenPanels)) {
+            thawPanel(p);
+        }
     }
 
     // ------------------------------------------------------------------ life totals
@@ -813,7 +981,13 @@ public final class MatchAnimator {
      * queue via an EDT hop, whereas a life change enqueued on the game thread would jump
      * the whole burst and drop the number before anything had hit.
      */
-    private void stageLifeTotal(final PlayerView player, final int oldLife, final int newLife) {
+    /**
+     * @param carriedByTrail true when a trail to this player is being built for the same
+     *                       change and will release the number as it lands, so no
+     *                       reconciling step of its own is wanted.
+     */
+    private void stageLifeTotal(final PlayerView player, final int oldLife, final int newLife,
+            final boolean carriedByTrail) {
         if (!isEnabled()) {
             return;
         }
@@ -821,15 +995,21 @@ public final class MatchAnimator {
         stagedLife.putIfAbsent(id, oldLife);
         FThreads.invokeInEdtLater(() -> {
             refreshLife(player);
+            if (carriedByTrail) {
+                return;
+            }
             // The authoritative value, as opposed to the running subtraction each strike
             // applies. Anything the strikes could not know about - damage prevented,
             // a replacement effect redirecting it - is reconciled here.
-            queue.enqueue(new AnimationStep("life:" + player.getName()).after(() -> {
-                stagedLife.put(id, newLife);
-                refreshLife(player);
-            }));
+            queue.enqueue(new AnimationStep("life:" + player.getName())
+                    .after(() -> setStagedLife(player, newLife)));
             clock.start();
         });
+    }
+
+    private void setStagedLife(final PlayerView player, final int life) {
+        stagedLife.put(player.getId(), life);
+        refreshLife(player);
     }
 
     /**
@@ -912,30 +1092,31 @@ public final class MatchAnimator {
      * once, here, when the thing is put there - after which the stack is the origin for
      * everything the resolution goes on to do.
      */
-    private void enqueueOntoStack(final CardView host, final PlayerView activator) {
-        enqueueOntoStack(host, activator, true);
-    }
-
+    /**
+     * @param slot the place already held for this in the queue, sealed once filled in.
+     */
     private void enqueueOntoStack(final CardView host, final PlayerView activator,
-            final boolean mayRetry) {
+            final boolean mayRetry, final AnimationStep slot) {
         final Point to = stackAnchor();
         Point from = centreOf(host);
         if (from == null && mayRetry && host != null && host.getZone() == ZoneType.Battlefield) {
             // An enters-the-battlefield trigger is put on the stack before the permanent's
             // panel has been built, so there is nowhere to draw from yet. Falling back to
             // the player here would be wrong - the ability is the permanent's, not the
-            // player's - so give the board one pass to catch up first.
-            FThreads.invokeInEdtLater(() -> enqueueOntoStack(host, activator, false));
+            // player's - so give the board one pass to catch up first. The slot goes with
+            // it, so the retry fills the place already held rather than a later one.
+            FThreads.invokeInEdtLater(() -> enqueueOntoStack(host, activator, false, slot));
             return;
         }
         if (from == null) {
             from = avatarCentre(activator);
         }
-        if (from == null || to == null) {
-            return;
+        if (from != null && to != null) {
+            slot.add(new BeamAnim(from, to, CardColors.of(host, canShow(host)), 1f, 420));
         }
-        queue.enqueue(new AnimationStep("cast:" + (host != null ? host.getName() : "ability"))
-                .add(new BeamAnim(from, to, CardColors.of(host, canShow(host)), 1f, 420)));
+        // Always sealed, even with nothing to draw: an unfilled reservation stalls the
+        // queue until it times out.
+        slot.seal();
         clock.start();
     }
 
@@ -1096,21 +1277,45 @@ public final class MatchAnimator {
             }
         });
 
-        // A fresh step, enqueued here and now. It is therefore always still ahead of the
-        // queue when its reveal is attached, which is what guarantees the card comes
-        // back - see the note in recordZoneChange about why this is not reserved.
-        final AnimationStep step = new AnimationStep("arrive:" + card.getName())
-                .after(() -> {
-                    panel.clearRenderTransform();
-                    clock.addFree(PanelAnim.fadeIn(panel, 320));
-                });
+        // Establish what this card looks like on arrival, so the next change to it is
+        // measured against the card as it entered - including whatever static abilities
+        // were already applying to it, which are in force by the time a panel exists.
+        // A card that has to wait for its first stats event to be measured has that event
+        // consumed as its baseline, and the change it was reporting is never shown.
+        fingerprints.put(card.getId(), fingerprint(card));
+
+        // The slot claimed when the card entered, which is ahead of anything its own
+        // arrival went on to cause. Falls back to a fresh step for a card that turned up
+        // without a zone change to announce it.
+        final AnimationStep reserved = arrivalSlots.remove(card.getId());
+        final AnimationStep step = reserved != null
+                ? reserved : new AnimationStep("arrive:" + card.getName());
         final Point dest = centreOf(panel);
         if (origin != null && dest != null) {
             step.add(new BeamAnim(origin, dest, CardColors.of(card, canShow(card)), 1f, 520));
         }
-        queue.enqueue(step);
+        // Attached after the beam so that if the slot has already been given up on, this
+        // applies immediately rather than being attached to a step that has gone by.
+        step.after(() -> {
+            panel.clearRenderTransform();
+            clock.addFree(PanelAnim.fadeIn(panel, 320));
+        });
+        if (reserved != null) {
+            reserved.seal();
+        } else {
+            queue.enqueue(step);
+        }
         clock.start();
     }
+
+    /**
+     * Places held in the queue for cards entering the battlefield, keyed by card id.
+     * <p>
+     * Claimed as the card enters and filled when its panel exists. Anything a permanent's
+     * arrival triggers queues behind the slot, so the permanent is always on screen before
+     * its own abilities start doing things.
+     */
+    private final Map<Integer, AnimationStep> arrivalSlots = new ConcurrentHashMap<>();
 
     // ------------------------------------------------------------------ mana
 
@@ -1188,6 +1393,12 @@ public final class MatchAnimator {
          */
         private boolean combat;
         /**
+         * Whether the source was the attacker, as opposed to a blocker. Captured at event
+         * time for the same reason {@link #combat} is: combat may be over by flush time.
+         * Only the attacker lunges - see {@link #enqueueDirectHits}.
+         */
+        private boolean attacking;
+        /**
          * Whether the source had this on the stack when it struck, decided on the game
          * thread while the stack still held the object. By flush time it is gone.
          */
@@ -1219,6 +1430,12 @@ public final class MatchAnimator {
         }
         final boolean onStack = actsFromStack(source);
         if (cardTarget != null) {
+            // Hold the victim looking undamaged until the blow reaches it. Everything the
+            // card shows is held together, so a planeswalker's loyalty and a creature's
+            // damage number both wait for the same moment.
+            freezeCard(cardTarget);
+        }
+        if (cardTarget != null) {
             // The other half of the rule in queueMod: the counters a planeswalker loses
             // may be announced before the damage that caused them, in which case the
             // modification spark is already queued and has to be taken back out. A
@@ -1233,6 +1450,7 @@ public final class MatchAnimator {
         synchronized (pendingDamage) {
             final DamageGroup g = pendingDamage.computeIfAbsent(source.getId(), k -> new DamageGroup(source));
             g.combat |= combat;
+            g.attacking |= source.isAttacking();
             g.fromStack |= onStack;
             if (cardTarget != null) {
                 g.cardTargets.add(cardTarget);
@@ -1290,7 +1508,10 @@ public final class MatchAnimator {
         final Map<Integer, Set<Integer>> counterHits = new HashMap<>();
         final Set<DamageGroup> folded = new HashSet<>();
         for (final DamageGroup g : groups) {
-            if (g.source == null || g.source.isAttacking() || !g.source.isBlocking()
+            // Read from what was captured as the blow landed, not from the live view:
+            // combat may already be over by the time this runs, in which case nothing
+            // reports itself as blocking any more and no blocker would ever be folded.
+            if (g.source == null || !g.combat || g.attacking
                     || g.cardTargets.isEmpty() || !g.playerTargets.isEmpty()) {
                 continue;
             }
@@ -1365,7 +1586,7 @@ public final class MatchAnimator {
         // from the attacker's damage, and the attacker flinches from the blocker's own
         // damage group. Lunging is for the aggressor. A burn spell must not lunge
         // either, hence the combat check rather than just testing for a creature.
-        final boolean striking = g.combat;
+        final boolean striking = g.combat && g.attacking;
 
         // A striking attacker gets one step per target so they play in sequence;
         // everything else resolves as a single step with its hits shown together.
@@ -1378,35 +1599,57 @@ public final class MatchAnimator {
             final AnimationStep step = striking
                     ? new AnimationStep("strike:" + g.source.getName())
                     : shared;
+            // When the blow actually connects. A strike lands as the attacker reaches
+            // full extension; a beam lands when its head arrives. Everything the damage
+            // causes is hung off this one moment, so the flinch, the number and the
+            // card's new face all happen together and none of them happen as the effect
+            // merely sets off.
+            final long contactMs;
             if (striking) {
+                contactMs = Math.round(IMPACT_MS * IMPACT_TRIGGER);
                 // The card itself crosses the gap, so sparks only at the point of
                 // contact - a beam would be drawing the same journey a second time.
                 step.add(new ImpactAnim(to, palette, g.total, IMPACT_MS, IMPACT_TRIGGER));
+            } else if (g.combat) {
+                // A blocker that was not folded into the attacker's strike. It still must
+                // not draw a trail: combat damage is dealt by contact, never by something
+                // crossing the board, so it gets the collision alone.
+                contactMs = Math.round(IMPACT_MS * IMPACT_TRIGGER);
+                step.add(new ImpactAnim(to, palette, g.total, IMPACT_MS, IMPACT_TRIGGER));
             } else if (from != null) {
+                contactMs = Math.round(BEAM_MS * BEAM_ARRIVAL);
                 // Nothing moves, so the effect has to travel on its own.
-                step.add(new BeamAnim(from, to, palette, g.total, 460));
+                step.add(new BeamAnim(from, to, palette, g.total, BEAM_MS));
+            } else {
+                contactMs = 0L;
             }
             if (target instanceof PlayerView pv) {
                 // A damaged player reacts too. Every player an effect hits gets one, so
                 // something that burns all opponents visibly rocks each of them.
-                step.add(playerFlinch(pv, palette));
-                // And their life total falls with this blow rather than with the whole
-                // damage step, so three attackers connecting reads as three drops.
+                step.add(delayed(playerFlinch(pv, palette), contactMs));
+                // And their life falls with this blow rather than at the end of the step,
+                // so three attackers connecting reads as three drops, each one landing
+                // with its own flinch instead of all of them after the last recoil.
                 final int hit = g.playerAmounts.getOrDefault(pv.getId(), 0);
                 if (hit > 0) {
-                    step.then(() -> applyLifeHit(pv, hit));
+                    step.add(CallbackAnim.at(contactMs, () -> applyLifeHit(pv, hit)));
                 }
             }
             if (target instanceof CardView cv) {
                 final CardPanel tp = findPanel(cv);
                 if (tp != null && from != null) {
-                    step.add(PanelAnim.flinch(tp, toPanelSpace(tp, from), 260));
+                    step.add(delayed(PanelAnim.flinch(tp, toPanelSpace(tp, from), 260), contactMs));
                 }
+                // The card was frozen when the damage was announced; this is the moment it
+                // is allowed to show what happened to it.
+                step.add(CallbackAnim.at(contactMs, () -> thawCard(cv)));
                 // If that blocker hit back, it recoils together with the attacker rather
-                // than in a beat of its own.
+                // than in a beat of its own - and the attacker takes its damage at the
+                // same instant, because in the rules the two blows are simultaneous.
                 if (striking && sourcePanel != null
                         && counterHits.getOrDefault(g.source.getId(), Set.of()).contains(cv.getId())) {
-                    step.add(PanelAnim.flinch(sourcePanel, toPanelSpace(sourcePanel, to), 260));
+                    step.add(delayed(PanelAnim.flinch(sourcePanel, toPanelSpace(sourcePanel, to), 260), contactMs));
+                    step.add(CallbackAnim.at(contactMs, () -> thawCard(g.source)));
                 }
             }
             if (striking) {
@@ -1495,27 +1738,39 @@ public final class MatchAnimator {
         }
         affected.addAll(g.playerTargets);
 
+        // The sweep is what the effect did once it got there, so it waits for the trail
+        // to arrive. Playing them together read as the board erupting and the effect then
+        // travelling towards the mess it had already made.
+        final Point origin = trailOrigin(g.source, g.fromStack);
+        final long contactMs = Math.round(BEAM_MS * BEAM_ARRIVAL);
         for (final PlayerView p : affected) {
             final Rectangle area = battlefieldBounds(p);
-            if (area != null) {
-                step.add(new BurstAnim(area, palette, Math.min(220, 60 + g.total * 10), 640));
+            if (area == null) {
+                continue;
             }
+            if (origin != null && claimBoardTrail(resolving, p)) {
+                step.add(new BeamAnim(origin,
+                        new Point(area.x + area.width / 2, area.y + area.height / 2),
+                        palette, 2f, BEAM_MS));
+            }
+            step.add(new BurstAnim(area, palette, Math.min(220, 60 + g.total * 10), 640)
+                    .delayedBy(contactMs));
         }
         // Still flinch each victim, so it stays clear which permanents were hit.
-        final Point origin = trailOrigin(g.source, g.fromStack);
         for (final CardView target : g.cardTargets) {
             final CardPanel tp = findPanel(target);
             if (tp != null && origin != null) {
-                step.add(PanelAnim.flinch(tp, toPanelSpace(tp, origin), 300));
+                step.add(delayed(PanelAnim.flinch(tp, toPanelSpace(tp, origin), 300), contactMs));
             }
+            step.add(CallbackAnim.at(contactMs, () -> thawCard(target)));
         }
         // And every player it burned, so an effect aimed at the whole table visibly
         // rocks each of them rather than only sweeping their boards.
         for (final PlayerView p : g.playerTargets) {
-            step.add(playerFlinch(p, palette));
+            step.add(delayed(playerFlinch(p, palette), contactMs));
             final int hit = g.playerAmounts.getOrDefault(p.getId(), 0);
             if (hit > 0) {
-                step.then(() -> applyLifeHit(p, hit));
+                step.add(CallbackAnim.at(contactMs, () -> applyLifeHit(p, hit)));
             }
         }
         if (!step.isEmpty()) {
@@ -1537,6 +1792,11 @@ public final class MatchAnimator {
         synchronized (this) {
             to = departing.remove(panel.getCard().getId());
         }
+        // Whatever it was doing here, the panel is going. Drop what it looked like and
+        // let it be measured afresh if it ever comes back - a card returning from a
+        // graveyard is a new object as far as its appearance is concerned.
+        fingerprints.remove(panel.getCard().getId());
+        frozenPanels.remove(panel);
         if (to == null) {
             // Not a tracked departure - a re-layout or a match teardown, not a death.
             return;

@@ -6761,6 +6761,9 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
         classLevel = level;
         view.updateClassLevel(this);
         updateAbilityTextForView();
+        // Levelling up changes what the card is and does, but updating the view alone
+        // announces nothing, so nothing downstream could react to it.
+        getGame().fireEvent(new GameEventCardStatsChanged(this));
     }
     public boolean isClassCard() {
         return getType().hasStringType("Class");

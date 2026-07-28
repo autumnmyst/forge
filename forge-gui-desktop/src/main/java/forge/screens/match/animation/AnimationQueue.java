@@ -265,6 +265,9 @@ public final class AnimationQueue {
         final AnimationStep done = current;
         current = null;
         run(done.getAfter(), done.getLabel(), "after");
+        // Marked after running, so anything attached from here on applies itself
+        // immediately rather than waiting for a step that has already gone by.
+        done.markPlayed();
     }
 
     /**

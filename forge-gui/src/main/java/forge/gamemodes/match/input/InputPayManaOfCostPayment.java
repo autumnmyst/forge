@@ -29,7 +29,10 @@ public class InputPayManaOfCostPayment extends InputPayMana {
         if (spellAbility.getPayCosts().isMandatory()) {
             List<Mana> refund = new ArrayList<>();
             mandatory = payer.getManaPool().payManaCostFromPool(new ManaCostBeingPaid(cost), spellAbility, true, refund);
-            payer.getManaPool().refundMana(refund);
+            // Quietly: this was only a test of whether the pool could cover the cost, and
+            // the pool ends up exactly as it started, so reporting mana gained would fire
+            // the sound and particle effect for a gain that never happened.
+            payer.getManaPool().refundManaQuietly(refund);
         }
 
         // Set Mana cost being paid for SA to be able to reference it later
