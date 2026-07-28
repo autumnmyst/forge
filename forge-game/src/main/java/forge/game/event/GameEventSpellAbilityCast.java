@@ -27,7 +27,12 @@ public record GameEventSpellAbilityCast(SpellAbilityView sa, StackItemView si, i
     }
 
     private static List<Integer> computeTargetStackItems(SpellAbility sa) {
-        if (sa.getTargetRestrictions() == null || sa.getHostCard() == null) {
+        // Deliberately not gated on this ability's own target restrictions. A modal spell
+        // does its targeting in the mode that was chosen, not in the spell itself, so the
+        // top-level ability has no restrictions to report and a mode that counters or
+        // copies another spell was being read as targeting nothing at all.
+        // getAllTargetChoices already walks the chosen modes.
+        if (sa.getHostCard() == null) {
             return Collections.emptyList();
         }
         final List<Integer> ids = new ArrayList<>(1);
