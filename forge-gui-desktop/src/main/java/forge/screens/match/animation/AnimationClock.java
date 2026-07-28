@@ -34,6 +34,19 @@ public final class AnimationClock {
     private long lastTickNanos;
     /** Playback rate from preferences; below 1 slows everything down. */
     private volatile float userSpeed = 1f;
+    private Runnable onIdle;
+
+    /**
+     * Called on the EDT the moment nothing is left to play.
+     * <p>
+     * This is the point at which the display has caught up with the game, so anything
+     * the animator was holding back - a life total frozen at a value the game has since
+     * moved past - can safely be let go of. Without it a single missed release would
+     * leave the number wrong for the rest of the match.
+     */
+    public void setOnIdle(final Runnable onIdle) {
+        this.onIdle = onIdle;
+    }
 
     /**
      * Set the playback rate. Applied here rather than inside the queue so it reaches
@@ -130,6 +143,9 @@ public final class AnimationClock {
             // Nothing left to show - go quiet rather than burn a repaint every 16ms.
             timer.stop();
             layer.repaint();
+            if (onIdle != null) {
+                onIdle.run();
+            }
         }
     }
 }

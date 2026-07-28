@@ -10,6 +10,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -20,16 +21,23 @@ import javax.swing.SwingUtilities;
 import forge.card.MagicColor;
 import forge.game.GameEntityView;
 import forge.game.card.CardView;
+import forge.game.card.CardView.CardStateView;
 import forge.game.combat.CombatView;
 import forge.game.event.GameEvent;
 import forge.game.event.GameEventCardChangeZone;
 import forge.game.event.EventValueChangeType;
+import forge.game.event.GameEventCardCounters;
 import forge.game.event.GameEventCardDamaged;
+import forge.game.event.GameEventCardStatsChanged;
 import forge.game.event.GameEventManaPool;
+import forge.game.event.GameEventPlayerCounters;
 import forge.game.event.GameEventPlayerDamaged;
+import forge.game.event.GameEventPlayerLivesChanged;
+import forge.game.event.GameEventReplacementApplied;
 import forge.game.event.GameEventSpellAbilityCast;
 import forge.game.event.GameEventSpellRemovedFromStack;
 import forge.game.event.GameEventSpellResolved;
+import forge.game.event.GameEventSpellResolving;
 import forge.game.player.PlayerView;
 import forge.game.spellability.SpellAbilityView;
 import forge.game.spellability.StackItemView;
@@ -59,6 +67,33 @@ public final class MatchAnimator {
 
     /** Distinct targets an untargeted source must hit before its damage reads as a sweep. */
     private static final int AOE_TARGET_THRESHOLD = 3;
+    /**
+     * Permanents under one controller that a single effect must touch for it to read as
+     * covering that player's board.
+     * <p>
+     * Lower than {@link #AOE_TARGET_THRESHOLD} because there is no ambiguity to guard
+     * against here: damage counts targets, where naming three creatures is not the same
+     * as sweeping, whereas this counts permanents an effect actually modified, and an
+     * effect that modified two of the three creatures someone controls is a board effect
+     * on a board that only had three creatures.
+     */
+    private static final int BOARD_EFFECT_THRESHOLD = 2;
+    /**
+     * Damage looks the same whatever dealt it.
+     * <p>
+     * The card's own colours are reserved for a permanent being modified, so that the two
+     * read as different kinds of event: a creature that flashes orange took damage, and a
+     * creature that flashes its own colours was changed.
+     */
+    private static final List<Color> DAMAGE_PALETTE =
+            List.of(new Color(255, 96, 32), new Color(255, 172, 64));
+    /**
+     * A replacement effect applying gets its own unmistakable yellow, distinct from any
+     * combination of card colours - something happened other than what was announced,
+     * and that is worth reading at a glance.
+     */
+    private static final List<Color> REPLACEMENT_PALETTE =
+            List.of(new Color(255, 226, 74), new Color(255, 250, 190));
     /** How far an attacker travels toward what it hits, as a fraction of the gap. */
     private static final float LUNGE_REACH = 0.55f;
     private static final long LUNGE_MS = 420L;
@@ -92,6 +127,7 @@ public final class MatchAnimator {
     public MatchAnimator(final CMatchUI matchUI) {
         this.matchUI = matchUI;
         layer.setQueue(queue);
+        clock.setOnIdle(this::releaseAllLife);
     }
 
     public JPanel getPanel() {
@@ -133,6 +169,14 @@ public final class MatchAnimator {
         arrivedFrom.clear();
         awaitingOrigin.clear();
         pendingDamage.clear();
+        fingerprints.clear();
+        stagedLife.clear();
+        resolving = null;
+        synchronized (pendingMods) {
+            pendingMods.clear();
+            modSource = null;
+            modScope = null;
+        }
         synchronized (pendingCasts) {
             pendingCasts.clear();
         }
@@ -218,12 +262,28 @@ public final class MatchAnimator {
                 recordZoneChange(e);
             } else if (ev instanceof GameEventSpellAbilityCast e) {
                 recordCast(e);
+            } else if (ev instanceof GameEventSpellResolving e) {
+                resolving = new Resolution(e.source());
             } else if (ev instanceof GameEventSpellResolved e) {
                 resolveCast(e);
             } else if (ev instanceof GameEventSpellRemovedFromStack e) {
                 forgetCast(e.sa());
             } else if (ev instanceof GameEventManaPool e) {
                 recordManaAdded(e);
+            } else if (ev instanceof GameEventCardStatsChanged e) {
+                for (final CardView c : e.cards()) {
+                    recordModified(c);
+                }
+            } else if (ev instanceof GameEventCardCounters e) {
+                // Counters state their own before and after, so unlike a stats change
+                // there is nothing to verify - this is always a real modification.
+                recordModified(e.card(), true);
+            } else if (ev instanceof GameEventReplacementApplied e) {
+                recordReplacement(e.host());
+            } else if (ev instanceof GameEventPlayerLivesChanged e) {
+                recordPlayerChange(e.player(), e.oldLives(), e.newLives());
+            } else if (ev instanceof GameEventPlayerCounters e) {
+                recordPlayerChange(e.receiver(), 0, 0);
             }
             // Note there is no token-created case: GameEventTokenCreated carries no
             // payload at all, so tokens are recognised by CardView.isToken() when their
@@ -366,14 +426,463 @@ public final class MatchAnimator {
         }
     }
 
+    // ------------------------------------------------------------------ resolution scope
+
+    /**
+     * The stack object currently resolving.
+     * <p>
+     * Everything a resolution does is announced between the resolving and resolved
+     * events, and much of it names no source: a life total moving, counters being
+     * placed. This is what those changes are credited to.
+     */
+    private static final class Resolution {
+        private final CardView source;
+        /**
+         * What this resolution has already run a trail to.
+         * <p>
+         * A spell that targets a player and then damages it is announced three times -
+         * as a target, as damage, and as a life total moving - and each would draw the
+         * same stack-to-player trail. Whichever gets there first claims the destination
+         * and the others draw nothing.
+         * <p>
+         * Concurrent because the claims come from both threads: the game thread as the
+         * events arrive, the EDT as the queued steps are built.
+         */
+        private final Set<String> reached = ConcurrentHashMap.newKeySet();
+
+        Resolution(final CardView source) {
+            this.source = source;
+        }
+    }
+
+    /** Written and read on the game thread; volatile only so teardown can clear it. */
+    private volatile Resolution resolving;
+
+    /** Stable key for a trail destination, so the same target cannot be drawn to twice. */
+    private static String reachKey(final GameEntityView entity) {
+        if (entity instanceof CardView c) {
+            return "c" + c.getId();
+        }
+        if (entity instanceof PlayerView p) {
+            return "p" + p.getId();
+        }
+        return "?";
+    }
+
+    /**
+     * Claim a destination for the resolution in progress.
+     *
+     * @return true if nothing has drawn to it yet and the caller should go ahead.
+     */
+    private boolean claimTrail(final GameEntityView entity) {
+        final Resolution r = resolving;
+        return r == null || r.reached.add(reachKey(entity));
+    }
+
+    /**
+     * As {@link #claimTrail}, for a destination that is a whole battlefield.
+     *
+     * @param scope taken explicitly, because board trails are built on the EDT after the
+     *              resolution that caused them has already closed.
+     */
+    private boolean claimBoardTrail(final Resolution scope, final PlayerView player) {
+        return scope == null || player == null || scope.reached.add("b" + player.getId());
+    }
+
+    /**
+     * Whether what this card is doing right now is being done from the stack.
+     * <p>
+     * This is the whole of the origin rule. A spell, an activated ability or a triggered
+     * ability is an object on the stack, and once it is there the stack is where its
+     * effects come from - drawing them out of the card as well tells the same story
+     * twice, and the card may not even be there any more. Only an effect that never used
+     * the stack at all, which in practice means a mana ability, still acts from the card
+     * it is printed on.
+     */
+    private boolean actsFromStack(final CardView source) {
+        if (source == null) {
+            return false;
+        }
+        final Resolution r = resolving;
+        if (r != null && r.source != null && r.source.getId() == source.getId()) {
+            return true;
+        }
+        synchronized (pendingCasts) {
+            for (final CastRecord rec : pendingCasts.values()) {
+                if (rec.source != null && rec.source.getId() == source.getId()) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Where a trail for this source should start, resolved on the EDT.
+     * <p>
+     * The decision itself is not made here - see {@link #actsFromStack}, which has to be
+     * asked on the game thread while the stack still holds the object.
+     */
+    private Point trailOrigin(final CardView source, final boolean fromStack) {
+        if (fromStack) {
+            return stackAnchor();
+        }
+        final Point at = centreOf(source);
+        // A card that acts outside the stack and is not on screen has nowhere sensible to
+        // start from, so fall back rather than drop the effect.
+        return at != null ? at : stackAnchor();
+    }
+
+    // ------------------------------------------------------------------ modifications
+
+    /** A permanent this burst of events changed, and what kind of change it was. */
+    private static final class ModRecord {
+        private final CardView card;
+        private boolean replacement;
+
+        ModRecord(final CardView card) {
+            this.card = card;
+        }
+    }
+
+    /**
+     * Modifications grouped over one burst, the same way damage is.
+     * <p>
+     * Grouped rather than sparked as they arrive because a single effect that changes
+     * several permanents has to be recognised as covering a board, which cannot be told
+     * from any one of its events.
+     */
+    private final Map<Integer, ModRecord> pendingMods = new LinkedHashMap<>();
+    private boolean modFlushQueued;
+    /** Whose effect this burst of modifications is, for the trail it draws. */
+    private CardView modSource;
+    private boolean modFromStack;
+    /**
+     * The resolution the burst belongs to, held so its board trails dedup against the
+     * same set the rest of that resolution used. It cannot be read at flush time: the
+     * resolution has closed by then.
+     */
+    private Resolution modScope;
+
+    /**
+     * The characteristics each card was last seen with.
+     * <p>
+     * Needed because {@code GameEventCardStatsChanged} is not a statement that anything
+     * changed. It is fired by {@code GameAction.checkStaticAbilities} for every card
+     * touched by any static ability, on every state check - which is constantly, and for
+     * most of the board. Sparking on the event itself would leave the table permanently
+     * flickering, so each card is compared against how it last looked and only a real
+     * difference counts.
+     */
+    private final Map<Integer, String> fingerprints = new ConcurrentHashMap<>();
+
+    /**
+     * What a card looks like, for the purpose of noticing it changed.
+     * <p>
+     * Damage is deliberately not part of this. Marking damage fires a stats-changed event
+     * of its own, and damage already has its own spark in its own colour - counting it
+     * here would spark a damaged creature twice, in two different colours, for one blow.
+     */
+    private static String fingerprint(final CardView card) {
+        try {
+            final CardStateView s = card.getCurrentState();
+            if (s == null) {
+                return "";
+            }
+            return s.getPower() + "/" + s.getToughness()
+                    + "|" + s.getLoyalty() + "|" + s.getDefense()
+                    + "|" + s.getType() + "|" + s.getKeywords().hashCode();
+        } catch (final RuntimeException e) {
+            // A card mid-transform can report inconsistently; treat it as unchanged
+            // rather than sparking on the inconsistency.
+            return "";
+        }
+    }
+
+    private void recordModified(final CardView card) {
+        recordModified(card, false);
+    }
+
+    /**
+     * @param certain true when the event already states a change happened, so the
+     *                characteristics need not be compared.
+     */
+    private void recordModified(final CardView card, final boolean certain) {
+        if (card == null || card.getZone() != ZoneType.Battlefield) {
+            // Only a permanent on the battlefield has a place to spark.
+            return;
+        }
+        if (!certain) {
+            final String now = fingerprint(card);
+            final String before = fingerprints.put(card.getId(), now);
+            if (now.isEmpty() || now.equals(before)) {
+                return;
+            }
+            if (before == null) {
+                // First sight of this card, so there is nothing it can have changed from.
+                // Without this every permanent any static ability touches would spark the
+                // first time it was mentioned, on top of its own arrival.
+                return;
+            }
+        } else {
+            fingerprints.put(card.getId(), fingerprint(card));
+        }
+        queueMod(card, false);
+    }
+
+    private void recordReplacement(final CardView host) {
+        if (host == null || host.getZone() != ZoneType.Battlefield) {
+            return;
+        }
+        queueMod(host, true);
+    }
+
+    private void queueMod(final CardView card, final boolean replacement) {
+        if (!replacement && isBeingDamaged(card)) {
+            // Damage owns the visual for anything it hits. A planeswalker taking damage
+            // loses loyalty counters, so it is announced as a modification as well, and
+            // would otherwise flash twice in two different colours for one blow.
+            return;
+        }
+        synchronized (pendingMods) {
+            final ModRecord m = pendingMods.computeIfAbsent(card.getId(), k -> new ModRecord(card));
+            m.replacement |= replacement;
+            if (modFlushQueued) {
+                return;
+            }
+            modFlushQueued = true;
+            // The first of a burst decides where the burst's trail comes from, while the
+            // resolution that caused it is still open. By flush time it has closed.
+            modScope = resolving;
+            modSource = modScope != null ? modScope.source : null;
+            modFromStack = modSource != null;
+        }
+        FThreads.invokeInEdtLater(this::flushMods);
+    }
+
+    /** Whether this card is among the victims of the damage burst still being collected. */
+    private boolean isBeingDamaged(final CardView card) {
+        synchronized (pendingDamage) {
+            for (final DamageGroup g : pendingDamage.values()) {
+                for (final CardView t : g.cardTargets) {
+                    if (t.getId() == card.getId()) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Spark everything this burst changed, and burst the board of any player who had
+     * enough permanents changed for the effect to read as covering it.
+     */
+    private void flushMods() {
+        final List<ModRecord> mods;
+        final CardView source;
+        final boolean fromStack;
+        final Resolution scope;
+        synchronized (pendingMods) {
+            modFlushQueued = false;
+            if (pendingMods.isEmpty()) {
+                return;
+            }
+            mods = new ArrayList<>(pendingMods.values());
+            source = modSource;
+            fromStack = modFromStack;
+            scope = modScope;
+            pendingMods.clear();
+            modSource = null;
+            modScope = null;
+        }
+
+        final AnimationStep step = new AnimationStep("modify");
+        final Map<PlayerView, Integer> perController = new LinkedHashMap<>();
+        for (final ModRecord m : mods) {
+            final Point at = centreOf(m.card);
+            if (at == null) {
+                continue;
+            }
+            // A replacement effect firing is about the card it is printed on, not about
+            // whatever effect happened to be resolving, so it is never counted towards a
+            // board sweep and never takes the effect's colours.
+            if (m.replacement) {
+                step.add(new ImpactAnim(at, REPLACEMENT_PALETTE, 1.6f, 420, 0f));
+                continue;
+            }
+            step.add(new ImpactAnim(at, CardColors.of(m.card, canShow(m.card)), 1.4f, 400, 0f));
+            final PlayerView controller = m.card.getController();
+            if (controller != null) {
+                perController.merge(controller, 1, Integer::sum);
+            }
+        }
+
+        for (final Map.Entry<PlayerView, Integer> e : perController.entrySet()) {
+            if (e.getValue() < BOARD_EFFECT_THRESHOLD) {
+                continue;
+            }
+            final Rectangle area = battlefieldBounds(e.getKey());
+            if (area == null) {
+                continue;
+            }
+            final List<Color> palette = source != null
+                    ? CardColors.of(source, canShow(source)) : CardColors.of(null, false);
+            step.add(new BurstAnim(area, palette, 150, 640));
+            // One trail per affected board rather than one per permanent, since what
+            // happened was a single effect reaching that board.
+            final Point origin = trailOrigin(source, fromStack);
+            final Point dest = new Point(area.x + area.width / 2, area.y + area.height / 2);
+            if (origin != null && claimBoardTrail(scope, e.getKey())) {
+                step.add(new BeamAnim(origin, dest, palette, 2f, 480));
+            }
+        }
+
+        if (!step.isEmpty()) {
+            queue.enqueue(step);
+            clock.start();
+        }
+    }
+
+    // ------------------------------------------------------------------ player changes
+
+    /**
+     * A player gained or lost life, or received counters, from something resolving.
+     * <p>
+     * Neither event names a source, which is what {@link #resolving} exists for. A change
+     * with nothing resolving behind it - a cost being paid, an upkeep trigger's own
+     * bookkeeping - is left alone rather than drawn out of a stack that has nothing on it.
+     */
+    private void recordPlayerChange(final PlayerView player, final int oldLife, final int newLife) {
+        if (player == null) {
+            return;
+        }
+        final int lifeDelta = newLife - oldLife;
+        if (lifeDelta != 0) {
+            stageLifeTotal(player, oldLife, newLife);
+        }
+        final Resolution r = resolving;
+        if (r == null || !claimTrail(player)) {
+            return;
+        }
+        final CardView source = r.source;
+        FThreads.invokeInEdtLater(() -> {
+            final Point from = stackAnchor();
+            final Point to = avatarCentre(player);
+            if (from == null || to == null) {
+                return;
+            }
+            final List<Color> palette = CardColors.of(source, canShow(source));
+            queue.enqueue(new AnimationStep("player:" + player.getName())
+                    .add(new BeamAnim(from, to, palette, Math.min(6, 1 + Math.abs(lifeDelta)), 480)));
+            clock.start();
+        });
+    }
+
+    // ------------------------------------------------------------------ life totals
+
+    /**
+     * What each player's life should be shown as while the blows that changed it play.
+     * <p>
+     * A player's life total is painted straight off the live {@code PlayerView}, so
+     * without this it reports the game's answer rather than the display's: three
+     * attackers connecting took the number from 20 to 10 in one jump, before any of the
+     * three had visibly landed.
+     */
+    private final Map<Integer, Integer> stagedLife = new ConcurrentHashMap<>();
+
+    /**
+     * The life total to paint for a player.
+     *
+     * @param actual the live value, returned unchanged when nothing is being held back.
+     */
+    public int displayedLife(final PlayerView player, final int actual) {
+        if (player == null || !isEnabled()) {
+            return actual;
+        }
+        final Integer staged = stagedLife.get(player.getId());
+        return staged != null ? staged : actual;
+    }
+
+    /**
+     * Freeze a player's displayed life at what it was before this change, and queue the
+     * step that lets it go.
+     * <p>
+     * Enqueued from the EDT rather than here, so it lands behind the strikes that explain
+     * it: the damage events that produced those strikes are announced first but reach the
+     * queue via an EDT hop, whereas a life change enqueued on the game thread would jump
+     * the whole burst and drop the number before anything had hit.
+     */
+    private void stageLifeTotal(final PlayerView player, final int oldLife, final int newLife) {
+        if (!isEnabled()) {
+            return;
+        }
+        final int id = player.getId();
+        stagedLife.putIfAbsent(id, oldLife);
+        FThreads.invokeInEdtLater(() -> {
+            refreshLife(player);
+            // The authoritative value, as opposed to the running subtraction each strike
+            // applies. Anything the strikes could not know about - damage prevented,
+            // a replacement effect redirecting it - is reconciled here.
+            queue.enqueue(new AnimationStep("life:" + player.getName()).after(() -> {
+                stagedLife.put(id, newLife);
+                refreshLife(player);
+            }));
+            clock.start();
+        });
+    }
+
+    /**
+     * Take a bite out of a player's displayed life as one blow lands, without waiting for
+     * the life change the game reports for the whole damage step.
+     * <p>
+     * Combat damage is simultaneous in the rules and the game reports it that way - three
+     * attackers produce one life change, not three - so stepping the number down per
+     * attacker means doing the subtraction here, from what each blow was worth.
+     */
+    private void applyLifeHit(final PlayerView player, final int amount) {
+        final int id = player.getId();
+        stagedLife.computeIfPresent(id, (k, v) -> v - amount);
+        refreshLife(player);
+    }
+
+    private void refreshLife(final PlayerView player) {
+        final VField field = fieldFor(player);
+        if (field != null) {
+            field.updateDetails();
+        }
+    }
+
+    /**
+     * Stop holding any life total back. Called when the queue runs dry, at which point
+     * the display has caught up with the game by definition and the live values are the
+     * right ones - so a release that never arrived cannot leave a number wrong for the
+     * rest of the match.
+     */
+    private void releaseAllLife() {
+        if (stagedLife.isEmpty()) {
+            return;
+        }
+        stagedLife.clear();
+        // Every field rather than only the ones held: repainting a detail panel is cheap,
+        // and this runs once when the queue empties, not per frame.
+        for (final VField f : matchUI.getFieldViews()) {
+            f.updateDetails();
+        }
+    }
+
     /** Draw the spell reaching its targets, at the moment it actually resolves. */
     private void resolveCast(final GameEventSpellResolved e) {
         final CastRecord rec;
         synchronized (pendingCasts) {
             rec = pendingCasts.remove(e.spell());
         }
+        // Read before the scope closes, so the targets drawn below dedup against whatever
+        // the resolution itself already drew while it was running.
+        final Resolution scope = resolving;
         if (rec == null || e.hasFizzled()) {
             // A fizzled spell never reached anything, so showing it connect would lie.
+            resolving = null;
             return;
         }
         // Claim the slot here, on the game thread, before returning. A resolution's own
@@ -386,11 +895,12 @@ public final class MatchAnimator {
         clock.start();
         FThreads.invokeInEdtLater(() -> {
             try {
-                enqueueResolution(rec, step);
+                enqueueResolution(rec, step, scope);
             } finally {
                 step.seal();
             }
         });
+        resolving = null;
     }
 
     /**
@@ -430,33 +940,13 @@ public final class MatchAnimator {
     }
 
     /**
-     * Whether resolving this card puts it onto the battlefield.
-     * <p>
-     * A creature, artifact, enchantment or planeswalker spell resolves into play, and
-     * its arrival animation already draws the stack-to-battlefield beam. Sparking as
-     * well would be a second, redundant flourish on top of it - and the spark lands on
-     * the card itself, which by then is sitting on the battlefield, so it reads as the
-     * effect happening in the wrong place entirely.
-     * <p>
-     * Read off the card rather than inferred from what appears afterwards, so it needs
-     * no correlation between the resolve event and the zone change that follows it.
-     */
-    private static boolean becomesPermanent(final CardView card) {
-        try {
-            return card != null && card.getCurrentState() != null
-                    && card.getCurrentState().getType() != null
-                    && card.getCurrentState().getType().isPermanent();
-        } catch (final RuntimeException e) {
-            return false;
-        }
-    }
-
-    /**
      * Fill in the slot reserved when the resolution was announced.
      *
-     * @param step already in the queue, ahead of the board refresh this effect caused.
+     * @param step  already in the queue, ahead of the board refresh this effect caused.
+     * @param scope the resolution that has just finished, holding what it already drew.
      */
-    private void enqueueResolution(final CastRecord rec, final AnimationStep step) {
+    private void enqueueResolution(final CastRecord rec, final AnimationStep step,
+            final Resolution scope) {
         // Everything a resolution does comes out of the stack, because that is where the
         // spell or ability is. Its trip out of its source was already shown when it was
         // put there, so repeating that here would tell the same half of the story twice.
@@ -468,6 +958,12 @@ public final class MatchAnimator {
         // specific creatures, and sweeping the board instead would claim it hit
         // everything. A sweep is for effects with no targets at all.
         for (final CardView c : rec.cardTargets) {
+            if (scope != null && !scope.reached.add(reachKey(c))) {
+                // Already drawn to while the spell was resolving - a burn spell's damage
+                // reaches its target before the resolution is announced, and a second
+                // identical trail on top of it is the duplication this guards against.
+                continue;
+            }
             // Live position first, so a target that moved is still followed; the position
             // taken at cast time as a fallback, for one the spell has just destroyed.
             Point to = centreOf(c);
@@ -479,20 +975,24 @@ public final class MatchAnimator {
             }
         }
         for (final PlayerView p : rec.playerTargets) {
+            if (scope != null && !scope.reached.add(reachKey(p))) {
+                continue;
+            }
             final Point to = avatarCentre(p);
             if (to != null) {
                 step.add(new BeamAnim(from, to, palette, 1f, 480));
             }
         }
-        if (step.isEmpty() && !becomesPermanent(rec.source)) {
-            // The catch-all: nothing targeted, and nothing about to enter play either, so
-            // the ability simply did its work. Sparked at the source card if it is still
-            // on the board - a prowess trigger, say - and at the stack if it is not.
-            final Point at = centreOf(rec.source);
-            step.add(new ImpactAnim(at != null ? at : from, palette, 2f, 420, 0f));
-        }
-        // Already queued. Left empty for a permanent spell, whose arrival draws the beam
-        // to where it lands; an empty step simply drains.
+        // Nothing else. A resolution draws a trail when it targets something, when it
+        // damages or drains a player, when it puts a permanent onto the battlefield or
+        // when it covers a board - and each of those is drawn by whichever part of the
+        // system saw it happen. An ability that simply did its work, drawing a card or
+        // filtering the top of a library, gets no flourish at all: it never used to be
+        // clear what the spark at the source meant, because it meant nothing in
+        // particular.
+        //
+        // Left empty for a permanent spell, whose arrival draws the beam to where it
+        // lands; an empty step simply drains.
         clock.start();
     }
 
@@ -560,7 +1060,7 @@ public final class MatchAnimator {
     }
 
     /** Set true to trace why a card entering play did or did not get an arrival beam. */
-    private static final boolean TRACE_ARRIVALS = true;
+    private static final boolean TRACE_ARRIVALS = false;
 
     private void enqueueArrival(final CardPanel panel, final CardView card, final Point origin) {
         if (TRACE_ARRIVALS) {
@@ -672,6 +1172,12 @@ public final class MatchAnimator {
         private final CardView source;
         private final List<CardView> cardTargets = new ArrayList<>(4);
         private final List<PlayerView> playerTargets = new ArrayList<>(2);
+        /**
+         * What each player took, as opposed to {@link #total}, which is everything this
+         * source dealt. A trampler's total covers the blockers as well, so it is not the
+         * bite to take out of the defending player's life.
+         */
+        private final Map<Integer, Integer> playerAmounts = new HashMap<>();
         private int total;
         /**
          * Whether this was a blow struck in combat, captured when the damage happened.
@@ -681,6 +1187,11 @@ public final class MatchAnimator {
          * ended and the attacker no longer say it is attacking.
          */
         private boolean combat;
+        /**
+         * Whether the source had this on the stack when it struck, decided on the game
+         * thread while the stack still held the object. By flush time it is gone.
+         */
+        private boolean fromStack;
 
         DamageGroup(final CardView source) {
             this.source = source;
@@ -696,32 +1207,77 @@ public final class MatchAnimator {
         if (source == null || amount <= 0) {
             return;
         }
+        // Claimed here, on the game thread, so damage takes precedence over the other two
+        // announcements of the same blow - the spell's target list and the victim's life
+        // total - both of which would otherwise draw a second trail along the same line.
+        // Damage is the right one to win: it is the only one that knows how hard it hit.
+        if (cardTarget != null) {
+            claimTrail(cardTarget);
+        }
+        if (playerTarget != null) {
+            claimTrail(playerTarget);
+        }
+        final boolean onStack = actsFromStack(source);
+        if (cardTarget != null) {
+            // The other half of the rule in queueMod: the counters a planeswalker loses
+            // may be announced before the damage that caused them, in which case the
+            // modification spark is already queued and has to be taken back out. A
+            // replacement effect firing on the same card is its own event and stays.
+            synchronized (pendingMods) {
+                final ModRecord queued = pendingMods.get(cardTarget.getId());
+                if (queued != null && !queued.replacement) {
+                    pendingMods.remove(cardTarget.getId());
+                }
+            }
+        }
         synchronized (pendingDamage) {
             final DamageGroup g = pendingDamage.computeIfAbsent(source.getId(), k -> new DamageGroup(source));
             g.combat |= combat;
+            g.fromStack |= onStack;
             if (cardTarget != null) {
                 g.cardTargets.add(cardTarget);
             }
             if (playerTarget != null) {
                 g.playerTargets.add(playerTarget);
+                g.playerAmounts.merge(playerTarget.getId(), amount, Integer::sum);
             }
             g.total += amount;
             if (damageFlushQueued) {
                 return;
             }
             damageFlushQueued = true;
+            // Claim the slot now, on the game thread, before anything else can be queued.
+            // A creature dying to this damage is announced as a zone change whose refresh
+            // reaches the EDT independently, and with an empty queue that refresh runs
+            // straight away - so the creature faded out before the attacker had visibly
+            // reached it. Reserving here means the refresh piles up behind the strikes
+            // instead, and the blows land before their consequences.
+            damageBarrier = new AnimationStep("damage").reserved();
+            queue.enqueue(damageBarrier);
         }
+        clock.start();
         // Same latch trick the batching event handler uses: everything the game thread
         // emits before the EDT next runs lands in one group, which is exactly the window
         // a single spell's damage occupies.
         FThreads.invokeInEdtLater(this::flushDamage);
     }
 
+    /** The slot the current damage burst will be spliced into; see {@link #recordDamage}. */
+    private AnimationStep damageBarrier;
+
     private void flushDamage() {
         final List<DamageGroup> groups;
+        final AnimationStep barrier;
         synchronized (pendingDamage) {
             damageFlushQueued = false;
+            barrier = damageBarrier;
+            damageBarrier = null;
             if (pendingDamage.isEmpty()) {
+                // Nothing to show after all, but the slot still has to be released or the
+                // queue sits on it until it times out.
+                if (barrier != null) {
+                    barrier.seal();
+                }
                 return;
             }
             groups = new ArrayList<>(pendingDamage.values());
@@ -751,6 +1307,7 @@ public final class MatchAnimator {
             folded.add(g);
         }
 
+        final List<AnimationStep> steps = new ArrayList<>(4);
         for (final DamageGroup g : groups) {
             if (folded.contains(g)) {
                 continue;
@@ -759,11 +1316,18 @@ public final class MatchAnimator {
             // gets a beam to each of them however many there are; hitting several things
             // is not the same as hitting an area.
             if (g.targetCount() >= AOE_TARGET_THRESHOLD && !isTargeting(g.source)) {
-                enqueueAreaEffect(g);
+                enqueueAreaEffect(g, steps);
             } else {
-                enqueueDirectHits(g, counterHits);
+                enqueueDirectHits(g, counterHits, steps);
             }
         }
+        // Into the slot claimed when the first blow was recorded, so these play ahead of
+        // the board refresh that has been waiting behind it, and then release the queue.
+        queue.enqueueBehind(barrier, steps);
+        if (barrier != null) {
+            barrier.seal();
+        }
+        clock.start();
     }
 
     /**
@@ -781,13 +1345,14 @@ public final class MatchAnimator {
      * {@link #orderTargets} puts the player last, so the attacker cuts through the
      * blockers and follows through to the player.
      */
-    private void enqueueDirectHits(final DamageGroup g, final Map<Integer, Set<Integer>> counterHits) {
+    private void enqueueDirectHits(final DamageGroup g, final Map<Integer, Set<Integer>> counterHits,
+            final List<AnimationStep> out) {
         final CardPanel sourcePanel = findPanel(g.source);
-        // A damage spell has no panel - it is on the stack while it burns things - so its
-        // beams come from there. Requiring a panel meant such a spell drew nothing at all.
-        final Point onBoard = centreOf(g.source);
-        final Point from = onBoard != null ? onBoard : stackAnchor();
-        final List<Color> palette = CardColors.of(g.source, canShow(g.source));
+        // Off the stack while the spell or ability is on it, and out of the card only for
+        // damage that never used the stack at all - a mana ability's own ping, which is
+        // the one case where the card really is the thing acting.
+        final Point from = trailOrigin(g.source, g.fromStack);
+        final List<Color> palette = DAMAGE_PALETTE;
         final List<GameEntityView> targets = orderTargets(g);
         if (targets.isEmpty()) {
             return;
@@ -825,6 +1390,12 @@ public final class MatchAnimator {
                 // A damaged player reacts too. Every player an effect hits gets one, so
                 // something that burns all opponents visibly rocks each of them.
                 step.add(playerFlinch(pv, palette));
+                // And their life total falls with this blow rather than with the whole
+                // damage step, so three attackers connecting reads as three drops.
+                final int hit = g.playerAmounts.getOrDefault(pv.getId(), 0);
+                if (hit > 0) {
+                    step.then(() -> applyLifeHit(pv, hit));
+                }
             }
             if (target instanceof CardView cv) {
                 final CardPanel tp = findPanel(cv);
@@ -848,15 +1419,14 @@ public final class MatchAnimator {
                             ? OverlayFlight.lunge(sourcePanel, snap, to, LUNGE_REACH, LUNGE_MS)
                             : PanelAnim.lunge(sourcePanel, toPanelSpace(sourcePanel, to), LUNGE_REACH, LUNGE_MS));
                 }
-                // Enqueued even with no panel to move: combat damage always reads as a
+                // Collected even with no panel to move: combat damage always reads as a
                 // strike, never as something travelling across the board.
-                queue.enqueue(step);
+                out.add(step);
             }
         }
         if (shared != null && !shared.isEmpty()) {
-            queue.enqueue(shared);
+            out.add(shared);
         }
-        clock.start();
     }
 
     /**
@@ -913,8 +1483,8 @@ public final class MatchAnimator {
     }
 
     /** An effect that hit enough things to be worth showing as a sweep over each board. */
-    private void enqueueAreaEffect(final DamageGroup g) {
-        final List<Color> palette = CardColors.of(g.source, canShow(g.source));
+    private void enqueueAreaEffect(final DamageGroup g, final List<AnimationStep> out) {
+        final List<Color> palette = DAMAGE_PALETTE;
         final AnimationStep step = new AnimationStep("aoe:" + g.source.getName());
 
         final Set<PlayerView> affected = new HashSet<>();
@@ -932,9 +1502,9 @@ public final class MatchAnimator {
             }
         }
         // Still flinch each victim, so it stays clear which permanents were hit.
+        final Point origin = trailOrigin(g.source, g.fromStack);
         for (final CardView target : g.cardTargets) {
             final CardPanel tp = findPanel(target);
-            final Point origin = centreOf(g.source);
             if (tp != null && origin != null) {
                 step.add(PanelAnim.flinch(tp, toPanelSpace(tp, origin), 300));
             }
@@ -943,10 +1513,13 @@ public final class MatchAnimator {
         // rocks each of them rather than only sweeping their boards.
         for (final PlayerView p : g.playerTargets) {
             step.add(playerFlinch(p, palette));
+            final int hit = g.playerAmounts.getOrDefault(p.getId(), 0);
+            if (hit > 0) {
+                step.then(() -> applyLifeHit(p, hit));
+            }
         }
         if (!step.isEmpty()) {
-            queue.enqueue(step);
-            clock.start();
+            out.add(step);
         }
     }
 
@@ -1054,8 +1627,8 @@ public final class MatchAnimator {
         final CardSnapshot snap = before != null ? before : CardSnapshot.capture(panel, layer);
         final Point destination = snap == null ? null : panelTopLeft(panel);
         final Anim reflow = destination != null
-                ? OverlayFlight.reflow(panel, snap,
-                        destination, snap.getBounds().width / (double) Math.max(1, panel.getWidth()), 260)
+                ? OverlayFlight.reflow(panel, snap, destination,
+                        panel.getWidth() / (double) Math.max(1, snap.getBounds().width), 260)
                 : PanelAnim.reflow(panel, dx, dy, scale, 260);
         runningReflows.put(panel, reflow);
         clock.addFree(reflow);

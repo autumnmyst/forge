@@ -75,6 +75,25 @@ public final class AnimationStep {
         return this;
     }
 
+    /**
+     * Add a change to run after the step, keeping any already registered.
+     * <p>
+     * Distinct from {@link #after} because a step can accumulate consequences from more
+     * than one place - a strike carries both its own effect and the bite it takes out of
+     * the defending player's life total - and the second must not silently drop the first.
+     */
+    public AnimationStep then(final Runnable r) {
+        if (r == null) {
+            return this;
+        }
+        final Runnable existing = after;
+        after = existing == null ? r : () -> {
+            existing.run();
+            r.run();
+        };
+        return this;
+    }
+
     /** Extra dwell after the animations finish, so back-to-back events stay readable. */
     public AnimationStep hold(final long ms) {
         this.holdMs = Math.max(0L, ms);

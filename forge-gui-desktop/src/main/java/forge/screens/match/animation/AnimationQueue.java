@@ -53,6 +53,40 @@ public final class AnimationQueue {
         }
     }
 
+    /**
+     * Insert steps immediately behind one already queued, preserving their order.
+     * <p>
+     * Exists for the case where a slot has to be claimed before it is known how many
+     * steps will fill it. A reservation blocks the queue, so anything enqueued in the
+     * meantime - notably the board refresh caused by the same event - piles up behind it;
+     * appending the real steps would then put them after that refresh, which is the
+     * ordering the reservation was taken out to prevent. Splicing puts them where the
+     * slot was.
+     *
+     * @param marker a step already in the queue. If it has already been played the steps
+     *               are appended, which is the best that can be done and still correct.
+     */
+    public synchronized void enqueueBehind(final AnimationStep marker, final List<AnimationStep> steps) {
+        if (steps == null || steps.isEmpty()) {
+            return;
+        }
+        if (marker == null || !pending.contains(marker)) {
+            for (final AnimationStep s : steps) {
+                pending.addLast(s);
+            }
+            return;
+        }
+        final List<AnimationStep> rebuilt = new ArrayList<>(pending.size() + steps.size());
+        for (final AnimationStep s : pending) {
+            rebuilt.add(s);
+            if (s == marker) {
+                rebuilt.addAll(steps);
+            }
+        }
+        pending.clear();
+        pending.addAll(rebuilt);
+    }
+
     public synchronized boolean isIdle() {
         return current == null && pending.isEmpty();
     }

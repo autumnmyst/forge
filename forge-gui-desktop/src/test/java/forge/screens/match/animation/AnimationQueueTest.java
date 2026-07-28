@@ -219,6 +219,51 @@ public class AnimationQueueTest {
         assertTrue(q.isIdle());
     }
 
+    /**
+     * The ordering that keeps a creature from fading out before the attacker reaches it.
+     * The board refresh is announced first and lands behind the reservation; the strikes
+     * are worked out afterwards and must still play before it.
+     */
+    @Test
+    public void splicedStepsPlayBeforeWhatWasQueuedAfterTheReservation() {
+        final List<String> log = new ArrayList<>();
+        final AnimationQueue q = new AnimationQueue();
+        final AnimationStep barrier = new AnimationStep("damage").reserved();
+        q.enqueue(barrier);
+        q.enqueue(new AnimationStep("board").after(() -> log.add("board")));
+
+        // Held while the slot is unfilled, so the refresh cannot overtake it.
+        q.tick(16);
+        assertTrue(log.isEmpty(), "the reservation must hold the refresh behind it");
+
+        q.enqueueBehind(barrier, List.of(step("strike1", log, 50), step("strike2", log, 50)));
+        barrier.seal();
+
+        for (int i = 0; i < 40 && !q.isIdle(); i++) {
+            q.tick(16);
+        }
+        assertEquals(log, List.of("strike1:before", "strike1:after",
+                "strike2:before", "strike2:after", "board"));
+    }
+
+    @Test
+    public void splicingBehindAStepAlreadyPlayedStillRuns() {
+        final List<String> log = new ArrayList<>();
+        final AnimationQueue q = new AnimationQueue();
+        final AnimationStep barrier = new AnimationStep("damage");
+        q.enqueue(barrier);
+        for (int i = 0; i < 5 && !q.isIdle(); i++) {
+            q.tick(16);
+        }
+
+        // Losing the ordering is acceptable; losing the step is not.
+        q.enqueueBehind(barrier, List.of(step("late", log, 50)));
+        for (int i = 0; i < 20 && !q.isIdle(); i++) {
+            q.tick(16);
+        }
+        assertEquals(log, List.of("late:before", "late:after"));
+    }
+
     @Test
     public void pausedQueueHoldsWithoutDropping() {
         final List<String> log = new ArrayList<>();
