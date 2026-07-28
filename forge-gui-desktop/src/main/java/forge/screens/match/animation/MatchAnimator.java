@@ -171,6 +171,11 @@ public final class MatchAnimator {
         layer.setQueue(queue);
         clock.setOnIdle(() -> {
             releaseAllLife();
+            // Sparks still waiting for an arrival that never came. Dropping them is right:
+            // the display has caught up, so there is nothing left to explain.
+            synchronized (this) {
+                sparksAwaitingArrival.clear();
+            }
             thawAllCards();
             showAllStackItems();
             // The display has caught up, so damage no longer owns anything's appearance
@@ -217,6 +222,7 @@ public final class MatchAnimator {
         arriving.clear();
         arrivedFrom.clear();
         pendingArrivals.clear();
+        sparksAwaitingArrival.clear();
         awaitingOrigin.clear();
         pendingDamage.clear();
         fingerprints.clear();
@@ -397,6 +403,9 @@ public final class MatchAnimator {
                         pendingArrivals.remove(id, arrival);
                     }
                 });
+                // Anything that changed this card before it was announced as entering has
+                // been waiting for exactly this step.
+                claimHeldSparks(id, arrival);
                 queue.enqueue(arrival);
                 clock.start();
                 FThreads.invokeInEdtLater(() -> claimAwaitingPanel(card, from));
@@ -404,6 +413,12 @@ public final class MatchAnimator {
                     // A land: its origin is the card still sitting in hand, so the hand
                     // panel has to be measured before the zone refresh takes it away.
                     departing.put(card.getId(), ZoneType.Battlefield);
+                    // And taken out of the hand now rather than by the deferred refresh,
+                    // which waits behind every animation this play set off. A land with a
+                    // trigger could sit in hand for the whole of its own arrival, so the
+                    // card was in two places at once - a basic land only looked right
+                    // because nothing was queued to hold the refresh up.
+                    FThreads.invokeInEdtLater(() -> removeFromHand(card));
                 }
             } else if (from == ZoneType.Battlefield) {
                 departing.put(card.getId(), to);
@@ -1077,6 +1092,27 @@ public final class MatchAnimator {
     }
 
     /**
+     * Take a card out of the hand it has just been played from.
+     * <p>
+     * Goes through the container's own removal so the card is still seen leaving - that
+     * hook is what copies the panel for its departure - and the deferred refresh that
+     * follows simply finds it already gone.
+     */
+    private void removeFromHand(final CardView card) {
+        for (final VHand h : matchUI.getHandViews()) {
+            try {
+                final CardPanel p = h.getHandArea().getCardPanel(card.getId());
+                if (p != null) {
+                    h.getHandArea().removeCardPanel(p);
+                    return;
+                }
+            } catch (final RuntimeException ignored) {
+                // A hand mid-relayout; the deferred refresh will still take it away.
+            }
+        }
+    }
+
+    /**
      * The battlefield panel for a card that is arriving, building it if the zone update
      * has not got here yet.
      * <p>
@@ -1116,8 +1152,39 @@ public final class MatchAnimator {
         final AnimationStep arrival;
         synchronized (this) {
             arrival = pendingArrivals.get(m.card.getId());
+            if (arrival == null) {
+                // The change was announced before the card's zone change was. A
+                // planeswalker's loyalty is put on as it enters, and the panel can already
+                // exist and be waiting - so there is something to spark and nothing yet to
+                // wait for. Sparking now was the whole bug: it fired before the arrival
+                // step had even been created, let alone played. Held until the arrival
+                // turns up and claimed by it.
+                sparksAwaitingArrival.computeIfAbsent(m.card.getId(), k -> new ArrayList<>(1)).add(m);
+                return;
+            }
         }
-        final Runnable spark = () -> {
+        arrival.then(sparkFor(m));
+    }
+
+    /**
+     * Sparks recorded for a card whose arrival has not been announced yet, keyed by card.
+     * Claimed by the arrival when it arrives, and dropped if it never does.
+     */
+    private final Map<Integer, List<ModRecord>> sparksAwaitingArrival = new HashMap<>();
+
+    /** Hand any sparks held for this card to the arrival that will show it. */
+    private void claimHeldSparks(final int cardId, final AnimationStep arrival) {
+        final List<ModRecord> held = sparksAwaitingArrival.remove(cardId);
+        if (held == null) {
+            return;
+        }
+        for (final ModRecord m : held) {
+            arrival.then(sparkFor(m));
+        }
+    }
+
+    private Runnable sparkFor(final ModRecord m) {
+        return () -> {
             final Point at = centreOf(m.card);
             if (at == null) {
                 thawCard(m.card);
@@ -1131,11 +1198,6 @@ public final class MatchAnimator {
             queue.enqueue(s);
             clock.start();
         };
-        if (arrival != null) {
-            arrival.then(spark);
-        } else {
-            spark.run();
-        }
     }
 
     // ------------------------------------------------------------------ player changes
