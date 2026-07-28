@@ -315,6 +315,27 @@ public class AnimationQueueTest {
         assertEquals(log, List.of("panels"));
     }
 
+    /**
+     * How an arrival gets ahead of what it triggered without holding a place. The trail
+     * can only be aimed once the refresh has built the card's panel, and by then the
+     * trigger is already queued - so the arrival is inserted at the front from inside
+     * that refresh's own hook.
+     */
+    @Test
+    public void aStepInsertedFromAHookPlaysBeforeWhatWasAlreadyQueued() {
+        final List<String> log = new ArrayList<>();
+        final AnimationQueue q = new AnimationQueue();
+        q.enqueue(new AnimationStep("buildPanels")
+                .after(() -> q.enqueueFirst(step("arrive", log, 50))));
+        q.enqueue(step("etbTrigger", log, 50));
+
+        for (int i = 0; i < 40 && !q.isIdle(); i++) {
+            q.tick(16);
+        }
+        assertEquals(log, List.of("arrive:before", "arrive:after",
+                "etbTrigger:before", "etbTrigger:after"));
+    }
+
     @Test
     public void delayedAnimationsStartLateButStillFinish() {
         final List<String> log = new ArrayList<>();

@@ -161,9 +161,9 @@ public final class MatchAnimator {
         clock.setOnIdle(() -> {
             releaseAllLife();
             thawAllCards();
-            // Any slot still held when the queue runs dry was force-sealed and played
-            // without ever being filled, so the reference is dead weight.
-            arrivalSlots.clear();
+            // The display has caught up, so damage no longer owns anything's appearance
+            // and the next change to these cards is a change in its own right.
+            damageClaimed.clear();
         });
     }
 
@@ -208,7 +208,7 @@ public final class MatchAnimator {
         pendingDamage.clear();
         fingerprints.clear();
         stagedLife.clear();
-        arrivalSlots.clear();
+        damageClaimed.clear();
         thawAllCards();
         resolving = null;
         synchronized (pendingMods) {
@@ -361,22 +361,17 @@ public final class MatchAnimator {
                 // trigger has long since queued its own trail and would play first, so
                 // the ability left a card that had not arrived yet.
                 //
-                // This was tried before and made cards permanently invisible, because a
-                // reservation the queue gave up on had already played by the time the
-                // reveal was attached to it. That is fixed at the source now: a hook
-                // attached to a step that has been and gone applies itself immediately,
-                // so the worst a lost reservation costs is the beam.
+                // Deliberately nothing queued here. An arrival cannot hold a place in the
+                // queue, because holding one blocks the board refresh queued behind it -
+                // and that refresh is what creates the card's panel, which is the only
+                // thing that knows where the card ended up. Reserving made the trail wait
+                // on something waiting on the reservation, so it timed out and was either
+                // lost or aimed at the middle of the battlefield instead of at the card.
                 //
-                // Crucially the slot is filled without waiting for the card's panel. The
-                // panel is built by the zone refresh, which is deferred and therefore
-                // queued *behind* this slot - so a slot that waited for it would be
-                // waiting on something waiting on itself, and every arrival would stall
-                // until the reservation timed out and lost its beam.
-                final AnimationStep slot = new AnimationStep("arrive:" + card.getName()).reserved();
-                arrivalSlots.put(card.getId(), slot);
-                queue.enqueue(slot);
-                clock.start();
-                FThreads.invokeInEdtLater(() -> fillArrivalSlot(card, from, slot));
+                // The arrival is built during that refresh instead and put at the front of
+                // the queue, which puts it ahead of anything the arrival itself triggered.
+                // See revealArrival.
+                FThreads.invokeInEdtLater(() -> claimAwaitingPanel(card, from));
                 if (from == ZoneType.Hand) {
                     // A land: its origin is the card still sitting in hand, so the hand
                     // panel has to be measured before the zone refresh takes it away.
@@ -453,12 +448,27 @@ public final class MatchAnimator {
         // planeswalker's loyalty counters are announced ahead of this event; without a
         // slot held here the loyalty had already changed by the time the trail explaining
         // it set off.
-        final AnimationStep slot = new AnimationStep(
-                "cast:" + (host != null ? host.getName() : "ability")).reserved();
-        queue.enqueue(slot);
-        clock.start();
+        //
+        // Not for a permanent that is still entering, though. A held slot blocks the
+        // board refresh queued behind it, and for a permanent arriving right now that
+        // refresh is what builds its panel and draws its arrival - so holding one would
+        // stall until it timed out, and the ability would still be leaving a card that
+        // had not appeared. Those queue in order behind the arrival instead.
+        final boolean hostArriving;
+        synchronized (this) {
+            hostArriving = host != null && arriving.contains(host.getId());
+        }
+        final AnimationStep slot;
+        if (hostArriving) {
+            slot = null;
+        } else {
+            slot = new AnimationStep(
+                    "cast:" + (host != null ? host.getName() : "ability")).reserved();
+            queue.enqueue(slot);
+            clock.start();
+        }
         FThreads.invokeInEdtLater(() -> {
-            enqueueOntoStack(host, activator, true, slot);
+            enqueueOntoStack(host, activator, slot);
             // Measure the targets now, while they are all still on the board.
             for (final CardView c : rec.cardTargets) {
                 final Point at = centreOf(c);
@@ -740,18 +750,21 @@ public final class MatchAnimator {
         }
     }
 
-    /** Whether this card is among the victims of the damage burst still being collected. */
+    /**
+     * Cards damage has claimed the visual for, until the display catches up.
+     * <p>
+     * Kept separately from {@link #pendingDamage} because that is emptied as soon as the
+     * damage is turned into steps, while the changes damage causes are announced for some
+     * time afterwards - a creature that traded blows is still having its state recomputed
+     * well after the blows themselves. Consulting the pending map alone meant an attacker
+     * picked up a modification spark of its own, in its own colours, in a step after the
+     * strike, when the strike had already shown everything that happened to it.
+     */
+    private final Set<Integer> damageClaimed = ConcurrentHashMap.newKeySet();
+
+    /** Whether damage has already claimed how this card's change is shown. */
     private boolean isBeingDamaged(final CardView card) {
-        synchronized (pendingDamage) {
-            for (final DamageGroup g : pendingDamage.values()) {
-                for (final CardView t : g.cardTargets) {
-                    if (t.getId() == card.getId()) {
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
+        return damageClaimed.contains(card.getId());
     }
 
     /**
@@ -1109,30 +1122,31 @@ public final class MatchAnimator {
      * everything the resolution goes on to do.
      */
     /**
-     * @param slot the place already held for this in the queue, sealed once filled in.
+     * @param slot a place already held for this in the queue, sealed once filled in, or
+     *             null to simply append.
      */
     private void enqueueOntoStack(final CardView host, final PlayerView activator,
-            final boolean mayRetry, final AnimationStep slot) {
-        final Point to = stackAnchor();
-        Point from = centreOf(host);
-        if (from == null && mayRetry && host != null && host.getZone() == ZoneType.Battlefield) {
-            // An enters-the-battlefield trigger is put on the stack before the permanent's
-            // panel has been built, so there is nowhere to draw from yet. Falling back to
-            // the player here would be wrong - the ability is the permanent's, not the
-            // player's - so give the board one pass to catch up first. The slot goes with
-            // it, so the retry fills the place already held rather than a later one.
-            FThreads.invokeInEdtLater(() -> enqueueOntoStack(host, activator, false, slot));
-            return;
+            final AnimationStep slot) {
+        final AnimationStep step = slot != null
+                ? slot
+                : new AnimationStep("cast:" + (host != null ? host.getName() : "ability"));
+        // The origin is worked out when the beam starts rather than now. A permanent's
+        // enters-the-battlefield trigger goes on the stack before the permanent has a
+        // card panel, so asking at this point gives nothing and the trail was drawn out
+        // of the player instead - which is wrong, the ability is the permanent's. By the
+        // time this plays, the board refresh and the arrival ahead of it have run.
+        step.add(new BeamAnim(
+                () -> {
+                    final Point at = centreOf(host);
+                    return at != null ? at : avatarCentre(activator);
+                },
+                this::stackAnchor,
+                CardColors.of(host, canShow(host)), 1f, 420));
+        if (slot != null) {
+            slot.seal();
+        } else {
+            queue.enqueue(step);
         }
-        if (from == null) {
-            from = avatarCentre(activator);
-        }
-        if (from != null && to != null) {
-            slot.add(new BeamAnim(from, to, CardColors.of(host, canShow(host)), 1f, 420));
-        }
-        // Always sealed, even with nothing to draw: an unfilled reservation stalls the
-        // queue until it times out.
-        slot.seal();
         clock.start();
     }
 
@@ -1252,7 +1266,7 @@ public final class MatchAnimator {
             arrivedFrom.remove(card.getId());
         }
         if (panel.getCard() != null) {
-            revealArrival(panel, card);
+            revealArrival(panel, card, from);
         }
     }
 
@@ -1260,57 +1274,15 @@ public final class MatchAnimator {
     private static final boolean TRACE_ARRIVALS = false;
 
     /**
-     * Draw the trail to where the permanent is about to appear, without waiting for it.
+     * Draw a permanent arriving and bring it into view when the trail lands.
      * <p>
-     * Aimed at the middle of the destination battlefield rather than at the card's own
-     * slot, because that slot does not exist yet and cannot: the panel is created by the
-     * zone refresh, which is queued behind this very step. Waiting for it deadlocked
-     * every arrival until the reservation timed out, which is exactly how the trail from
-     * the stack to the battlefield went missing.
-     * <p>
-     * The imprecision is small and mostly invisible - the card lands within its own
-     * battlefield a moment later, and layout was going to decide where anyway.
+     * Built here, from inside the board refresh that created the panel, because this is
+     * the first moment the card's place on the battlefield is known - and aiming at the
+     * card is the whole point of the trail. Put at the front of the queue so it still
+     * plays before whatever the arrival triggered, which was queued while the card was
+     * entering.
      */
-    private void fillArrivalSlot(final CardView card, final ZoneType from, final AnimationStep slot) {
-        try {
-            final Point origin = originFor(from, card);
-            // If the panel happens to exist already - the zone change lost the race with
-            // the refresh - aim at the card itself, which is better still.
-            final CardPanel existing = findPanel(card);
-            Point dest = existing != null ? centreOf(existing) : null;
-            if (dest == null) {
-                final Rectangle area = battlefieldBounds(card.getController());
-                if (area != null) {
-                    dest = new Point(area.x + area.width / 2, area.y + area.height / 2);
-                }
-            }
-            if (TRACE_ARRIVALS) {
-                System.out.println("[anim] arrival " + card.getName()
-                        + " origin=" + origin + " dest=" + dest + " panel=" + (existing != null));
-            }
-            if (origin != null && dest != null) {
-                slot.add(new BeamAnim(origin, dest, CardColors.of(card, canShow(card)), 1f, 520));
-            }
-        } finally {
-            // Always, whatever happened above: an unfilled reservation stalls the whole
-            // queue, and the zone refresh behind it is what puts the card on the board.
-            slot.seal();
-        }
-        clock.start();
-        // The panel may already exist - see awaitZoneChange.
-        claimAwaitingPanel(card, from);
-    }
-
-    /**
-     * Bring a newly built panel into view, once the trail that carried it has played.
-     * <p>
-     * Separate from the trail because the two become available at different times: the
-     * trail is drawn as the card enters, and the panel exists only after the zone refresh
-     * that follows it. Normally the trail has already played by the time this runs, so
-     * the fade starts at once; when the panel wins the race instead, it is attached to
-     * the trail's step and waits for it.
-     */
-    private void revealArrival(final CardPanel panel, final CardView card) {
+    private void revealArrival(final CardPanel panel, final CardView card, final ZoneType from) {
         // Hidden here and now, not when the step reaches the front of the queue. The
         // panel is made visible by the zone refresh on a later EDT pass, so anything
         // later than this lets a frame or two of the card through - it appeared, vanished
@@ -1341,29 +1313,23 @@ public final class MatchAnimator {
         // consumed as its baseline, and the change it was reporting is never shown.
         fingerprints.put(card.getId(), fingerprint(card));
 
-        final Runnable reveal = () -> {
-            panel.clearRenderTransform();
-            clock.addFree(PanelAnim.fadeIn(panel, 320));
-        };
-        final AnimationStep slot = arrivalSlots.remove(card.getId());
-        if (slot != null) {
-            // Applies immediately if that step has already played, which is the usual
-            // case and the whole reason a late hook is allowed to run itself.
-            slot.then(reveal);
-        } else {
-            reveal.run();
+        final AnimationStep step = new AnimationStep("arrive:" + card.getName())
+                .after(() -> {
+                    panel.clearRenderTransform();
+                    clock.addFree(PanelAnim.fadeIn(panel, 320));
+                });
+        final Point origin = originFor(from, card);
+        final Point dest = centreOf(panel);
+        if (TRACE_ARRIVALS) {
+            System.out.println("[anim] arrival " + card.getName()
+                    + " origin=" + origin + " dest=" + dest);
         }
+        if (origin != null && dest != null) {
+            step.add(new BeamAnim(origin, dest, CardColors.of(card, canShow(card)), 1f, 520));
+        }
+        queue.enqueueFirst(step);
         clock.start();
     }
-
-    /**
-     * Places held in the queue for cards entering the battlefield, keyed by card id.
-     * <p>
-     * Claimed as the card enters, so that anything the arrival goes on to trigger queues
-     * behind it and the permanent's trail is always drawn before its abilities start
-     * doing things.
-     */
-    private final Map<Integer, AnimationStep> arrivalSlots = new ConcurrentHashMap<>();
 
     // ------------------------------------------------------------------ mana
 
@@ -1482,7 +1448,11 @@ public final class MatchAnimator {
             // card shows is held together, so a planeswalker's loyalty and a creature's
             // damage number both wait for the same moment.
             freezeCard(cardTarget);
+            damageClaimed.add(cardTarget.getId());
         }
+        // The source too: a creature that struck is about to have its own state
+        // recomputed, and whatever that produces was already shown by the exchange.
+        damageClaimed.add(source.getId());
         if (cardTarget != null) {
             // The other half of the rule in queueMod: the counters a planeswalker loses
             // may be announced before the damage that caused them, in which case the
@@ -1563,13 +1533,13 @@ public final class MatchAnimator {
                     || g.cardTargets.isEmpty() || !g.playerTargets.isEmpty()) {
                 continue;
             }
-            boolean allAttackers = true;
-            for (final CardView t : g.cardTargets) {
-                allAttackers &= t.isAttacking();
-            }
-            if (!allAttackers) {
-                continue;
-            }
+            // No further check that the victims are attackers. It was there to be sure
+            // this really was a blocker striking back, but it asked the live view - and
+            // once combat has ended nothing reports itself as attacking, so the fold
+            // silently stopped happening and the blocker's damage became a beat of its
+            // own after the attacker's. Combat damage from something that is not the
+            // attacker is the blocker hitting what it blocked; there is nothing else it
+            // can be.
             for (final CardView t : g.cardTargets) {
                 counterHits.computeIfAbsent(t.getId(), k -> new HashSet<>()).add(g.source.getId());
             }
@@ -1887,7 +1857,7 @@ public final class MatchAnimator {
                         + " expected=" + expected + " from=" + from + " token=" + card.isToken());
             }
             if (expected) {
-                revealArrival(panel, card);
+                revealArrival(panel, card, from);
             } else {
                 // The zone change has not reached us yet. It cannot simply be waited for
                 // in order, because which of the two arrives first is a race: the card is
