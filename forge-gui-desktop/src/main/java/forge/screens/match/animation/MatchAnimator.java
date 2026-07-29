@@ -226,6 +226,7 @@ public final class MatchAnimator {
 
     public void dispose() {
         clock.stop();
+        modFlush.stop();
         soundThread.shutdownNow();
         queue.skipAll();
         departing.clear();
@@ -923,16 +924,30 @@ public final class MatchAnimator {
                 modLeaving = leaving;
             }
         }
-        if (first) {
-            // Deliberately not holding a place in the queue while this gathers. A static
-            // ability takes hold while the permanent carrying it is being put onto the
-            // battlefield, which is announced before the zone change is - so a slot taken
-            // here is taken ahead of that permanent's own arrival, and the board flashed
-            // before the card that did it had appeared.
-            final Timer coalesce = new Timer(MOD_COALESCE_MS, e -> flushMods());
-            coalesce.setRepeats(false);
-            coalesce.start();
-        }
+        // Restarted by every change, so the burst ends when the changes stop rather than a
+        // fixed time after the first one. Deliberately not holding a place in the queue
+        // while it gathers: a static ability takes hold while the permanent carrying it is
+        // being put onto the battlefield, which is announced before the zone change is, so
+        // a slot taken here is taken ahead of that permanent's own arrival and the board
+        // flashes before the card that did it has appeared.
+        scheduleModFlush();
+    }
+
+    /**
+     * Wait a moment more before showing the changes gathered so far.
+     * <p>
+     * Safe to call from either thread; {@link Timer} is thread safe and fires on the EDT.
+     */
+    private void scheduleModFlush() {
+        modFlush.restart();
+    }
+
+    private final Timer modFlush = createModFlushTimer();
+
+    private Timer createModFlushTimer() {
+        final Timer t = new Timer(MOD_COALESCE_MS, e -> flushMods());
+        t.setRepeats(false);
+        return t;
     }
 
     /**
@@ -978,6 +993,15 @@ public final class MatchAnimator {
         final boolean entering;
         final boolean leaving;
         synchronized (pendingMods) {
+            if (modScope != null && resolving == modScope) {
+                // The effect that opened this burst is still running, and it announces what
+                // it changed one permanent at a time - a counter fires two events per card
+                // and runs that card's triggers before moving on, which is wide enough for
+                // a fixed wait to expire in the middle of the effect. What ends the burst
+                // is the effect finishing, not a stopwatch, so wait again.
+                scheduleModFlush();
+                return;
+            }
             modFlushQueued = false;
             // Whatever left the battlefield has now been accounted for, whether or not it
             // changed anything. Left set, it would make the next effect - a lord entering
