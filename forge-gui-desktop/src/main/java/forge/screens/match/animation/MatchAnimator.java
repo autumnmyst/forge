@@ -178,11 +178,6 @@ public final class MatchAnimator {
             // The display has caught up, so damage no longer owns anything's appearance
             // and the next change to these cards is a change in its own right.
             damageClaimed.clear();
-            // Same reasoning for the departure a change would be judged against. Cleared
-            // by each flush, but a death whose consequences are never shown would leave it
-            // set with nothing coming to clear it - and every board effect after that
-            // would read as an effect wearing off rather than one being applied.
-            departedSinceFlush = false;
         });
     }
 
@@ -230,7 +225,6 @@ public final class MatchAnimator {
         soundThread.shutdownNow();
         queue.skipAll();
         departing.clear();
-        departedSinceFlush = false;
         arriving.clear();
         arrivedFrom.clear();
         pendingArrivals.clear();
@@ -425,9 +419,6 @@ public final class MatchAnimator {
                 }
             } else if (from == ZoneType.Battlefield) {
                 departing.put(card.getId(), to);
-                if (to != ZoneType.Battlefield && to != ZoneType.Stack) {
-                    departedSinceFlush = true;
-                }
             }
         }
     }
@@ -792,16 +783,20 @@ public final class MatchAnimator {
     private boolean modLeaving;
 
     /**
-     * Whether a permanent has left a battlefield since the last burst of changes was
-     * shown, which is what says a continuous effect is letting go rather than taking hold.
+     * Whether anything is on its way off the battlefield right now.
      * <p>
-     * Deliberately not read off {@code departing}, which is display bookkeeping: an entry
-     * there lives until the deferred refresh takes the panel away, so asking it meant
-     * "something left at some point in the backlog we have not drawn yet" rather than
-     * "something is leaving now". One creature dying suppressed the board sweep on every
-     * effect that followed it until the queue ran dry.
+     * Not simply whether {@code departing} has entries: a land being played is recorded
+     * there too, so that leaving hand is not mistaken for dying, and that is an arrival
+     * rather than a departure.
      */
-    private volatile boolean departedSinceFlush;
+    private boolean anyLeavingBattlefield() {
+        for (final ZoneType to : departing.values()) {
+            if (to != ZoneType.Battlefield && to != ZoneType.Stack) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     /**
      * The characteristics each card was last seen with.
@@ -901,8 +896,8 @@ public final class MatchAnimator {
         final boolean leaving;
         synchronized (this) {
             entering = !arriving.isEmpty();
+            leaving = anyLeavingBattlefield();
         }
-        leaving = departedSinceFlush;
         final boolean first;
         synchronized (pendingMods) {
             final ModRecord m = pendingMods.computeIfAbsent(card.getId(), k -> new ModRecord(card));
@@ -953,12 +948,6 @@ public final class MatchAnimator {
         final boolean entering;
         final boolean leaving;
         synchronized (pendingMods) {
-            if (modScope != null && resolving == modScope) {
-                // Still mid-resolution, and it announces what it changed a card at a time.
-                // Left armed rather than flushed, so nothing else queues a second pass:
-                // endResolution posts this again once the whole effect has been announced.
-                return;
-            }
             modFlushQueued = false;
             if (pendingMods.isEmpty()) {
                 return;
@@ -975,9 +964,6 @@ public final class MatchAnimator {
             modEntering = false;
             modLeaving = false;
         }
-        // The departure this burst was measured against has been accounted for; the next
-        // burst is judged on what leaves after this one, not on the same death again.
-        departedSinceFlush = false;
 
         // Whether this was an effect being applied or one wearing off. Only an
         // application sweeps a board: something being put onto everything at once is a
@@ -1009,28 +995,17 @@ public final class MatchAnimator {
         final Map<PlayerView, Integer> perController = new LinkedHashMap<>();
         final List<ModRecord> visible = new ArrayList<>(mods.size());
         for (final ModRecord m : mods) {
+            final CardPanel panel = findPanel(m.card);
+            if (panel == null || centreOf(panel) == null) {
+                continue;
+            }
             // Nothing to spark on a card that is not on screen yet. A planeswalker is
             // given its loyalty on the way in, and anything entering with counters or
             // under a lord is in the same position: the card arrives with it already
             // there, so there is no change for a spark to mark - not before it lands and
             // not after either. It still counts towards the sweep below, because the
             // effect did reach that board, and it is thawed in case the freeze caught it.
-            //
-            // Having no panel at all is that same case, not a different one - a token
-            // created under a lord is modified before anything has been built to draw it
-            // on. Told apart from a card that simply is not here by asking the game where
-            // the card is rather than by asking what the display has caught up with:
-            // dropping these was what stopped a lord reaching a board full of tokens from
-            // reading as a sweep, since none of them counted.
-            final CardPanel panel = findPanel(m.card);
-            if (panel == null) {
-                if (m.card.getZone() != ZoneType.Battlefield) {
-                    continue;
-                }
-                thawCard(m.card);
-            } else if (centreOf(panel) == null) {
-                continue;
-            } else if (panel.getRenderAlpha() <= 0f) {
+            if (panel.getRenderAlpha() <= 0f) {
                 thawCard(m.card);
             } else {
                 visible.add(m);
@@ -1045,14 +1020,6 @@ public final class MatchAnimator {
             if (controller != null) {
                 perController.merge(controller, 1, Integer::sum);
             }
-        }
-
-        if (TRACE_MODS) {
-            System.out.println("[anim] mods=" + mods.size() + " visible=" + visible.size()
-                    + " applied=" + applied + " scope=" + (scope == null ? "null" : nameOf(scope.source))
-                    + " entering=" + entering + " leaving=" + leaving
-                    + " perController=" + perController.values()
-                    + " threshold=" + BOARD_EFFECT_THRESHOLD);
         }
 
         long sparkAt = 0L;
@@ -1422,7 +1389,7 @@ public final class MatchAnimator {
                 queue.enqueue(step);
                 clock.start();
             }
-            endResolution();
+            resolving = null;
             return;
         }
         // Claim the slot here, on the game thread, before returning. A resolution's own
@@ -1440,32 +1407,7 @@ public final class MatchAnimator {
                 step.seal();
             }
         });
-        endResolution();
-    }
-
-    /**
-     * Close the open resolution, and show anything it changed.
-     * <p>
-     * A resolution that changes several permanents announces them one at a time - a pump
-     * fires an event per creature, and counters fire two - with trigger handling in
-     * between. The flush those changes queue runs on the EDT, so it could land in one of
-     * those gaps and show part of the effect: the first creature sparked on its own, and
-     * the rest a moment later as a separate event. Two of one thing rather than one of
-     * two, which is exactly what decides whether an effect reads as covering a board.
-     * <p>
-     * So a burst opened by a resolution waits for that resolution to finish, which is
-     * here. Changes with nothing resolving behind them - a static taking hold as a
-     * permanent enters - are unaffected and still flush on the next pass.
-     */
-    private void endResolution() {
         resolving = null;
-        final boolean pending;
-        synchronized (pendingMods) {
-            pending = modFlushQueued && !pendingMods.isEmpty();
-        }
-        if (pending) {
-            FThreads.invokeInEdtLater(this::flushMods);
-        }
     }
 
     /**
@@ -1662,9 +1604,6 @@ public final class MatchAnimator {
 
     /** Set true to trace why a card entering play did or did not get an arrival beam. */
     private static final boolean TRACE_ARRIVALS = false;
-
-    /** Set true to trace why a burst of changes did or did not sweep a board. */
-    private static final boolean TRACE_MODS = false;
 
     /**
      * A panel has just been built for a card that is entering play: hide it, so nothing
