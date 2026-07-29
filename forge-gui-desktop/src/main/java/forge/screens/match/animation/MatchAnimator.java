@@ -855,11 +855,6 @@ public final class MatchAnimator {
         if (!certain) {
             final String now = fingerprint(card);
             final String before = fingerprints.put(card.getId(), now);
-            if (TRACE_MODS) {
-                System.out.println("[anim] mod? " + card.getName()
-                        + (now.equals(before) ? " SAME " : before == null ? " FIRST " : " CHANGED ")
-                        + before + " -> " + now);
-            }
             if (now.isEmpty() || now.equals(before)) {
                 return;
             }
@@ -899,9 +894,12 @@ public final class MatchAnimator {
         // counters and icons straight off the live card. Every card in the burst, not
         // just the one that opened it.
         freezeCard(card);
-        // Read before taking the other lock, and while they are still true: whether a
-        // permanent is joining the board or leaving it is what says whether a static
-        // ability is taking hold or letting go.
+        // Whether a permanent is joining the board or leaving it is what says whether a
+        // static ability is taking hold or letting go. Joining is read here, while it is
+        // still true - the arrival is claimed as soon as the panel exists, which can
+        // happen before this burst is shown. Leaving is only provisional here and is
+        // taken again at flush time, since a departure is announced after the changes it
+        // causes.
         final boolean entering;
         final boolean leaving;
         synchronized (this) {
@@ -1091,14 +1089,6 @@ public final class MatchAnimator {
             if (controller != null) {
                 perController.merge(controller, 1, Integer::sum);
             }
-        }
-
-        if (TRACE_MODS) {
-            System.out.println("[anim] burst mods=" + mods.size() + " visible=" + visible.size()
-                    + " applied=" + applied + " scope=" + (scope == null ? "null" : nameOf(scope.source))
-                    + " entering=" + entering + " leaving=" + leaving
-                    + " perController=" + perController.values()
-                    + " threshold=" + BOARD_EFFECT_THRESHOLD);
         }
 
         long sparkAt = 0L;
@@ -1693,13 +1683,6 @@ public final class MatchAnimator {
 
     /** Set true to trace why a card entering play did or did not get an arrival beam. */
     private static final boolean TRACE_ARRIVALS = false;
-
-    /**
-     * Set true to trace which changes were noticed and how they were grouped. Prints a
-     * line per change considered and a line per burst shown, which together say whether a
-     * missing spark was never noticed, noticed and dropped, or shown but not as a sweep.
-     */
-    private static final boolean TRACE_MODS = true;
 
     /**
      * A panel has just been built for a card that is entering play: hide it, so nothing
