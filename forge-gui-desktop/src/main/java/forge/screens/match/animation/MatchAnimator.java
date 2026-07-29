@@ -850,6 +850,11 @@ public final class MatchAnimator {
         if (!certain) {
             final String now = fingerprint(card);
             final String before = fingerprints.put(card.getId(), now);
+            if (TRACE_MODS) {
+                System.out.println("[anim] mod? " + card.getName()
+                        + (now.equals(before) ? " SAME " : before == null ? " FIRST " : " CHANGED ")
+                        + before + " -> " + now);
+            }
             if (now.isEmpty() || now.equals(before)) {
                 return;
             }
@@ -1020,6 +1025,14 @@ public final class MatchAnimator {
             if (controller != null) {
                 perController.merge(controller, 1, Integer::sum);
             }
+        }
+
+        if (TRACE_MODS) {
+            System.out.println("[anim] burst mods=" + mods.size() + " visible=" + visible.size()
+                    + " applied=" + applied + " scope=" + (scope == null ? "null" : nameOf(scope.source))
+                    + " entering=" + entering + " leaving=" + leaving
+                    + " perController=" + perController.values()
+                    + " threshold=" + BOARD_EFFECT_THRESHOLD);
         }
 
         long sparkAt = 0L;
@@ -1604,6 +1617,13 @@ public final class MatchAnimator {
 
     /** Set true to trace why a card entering play did or did not get an arrival beam. */
     private static final boolean TRACE_ARRIVALS = false;
+
+    /**
+     * Set true to trace which changes were noticed and how they were grouped. Prints a
+     * line per change considered and a line per burst shown, which together say whether a
+     * missing spark was never noticed, noticed and dropped, or shown but not as a sweep.
+     */
+    private static final boolean TRACE_MODS = false;
 
     /**
      * A panel has just been built for a card that is entering play: hide it, so nothing
