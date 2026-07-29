@@ -178,6 +178,11 @@ public final class MatchAnimator {
             // The display has caught up, so damage no longer owns anything's appearance
             // and the next change to these cards is a change in its own right.
             damageClaimed.clear();
+            // Same reasoning for the departure a change would be judged against. Cleared
+            // by each flush, but a death whose consequences are never shown would leave it
+            // set with nothing coming to clear it - and every board effect after that
+            // would read as an effect wearing off rather than one being applied.
+            departedSinceFlush = false;
         });
     }
 
