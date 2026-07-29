@@ -1003,11 +1003,11 @@ public final class MatchAnimator {
                 return;
             }
             modFlushQueued = false;
-            // Whatever left the battlefield has now been accounted for, whether or not it
-            // changed anything. Left set, it would make the next effect - a lord entering
-            // and giving a board a keyword - read as an effect wearing off instead.
-            departedSinceFlush = false;
             if (pendingMods.isEmpty()) {
+                // Whatever left the battlefield has been accounted for even though it
+                // changed nothing. Left set, it would make the next effect - a lord
+                // entering and giving a board a keyword - read as one wearing off.
+                departedSinceFlush = false;
                 return;
             }
             mods = new ArrayList<>(pendingMods.values());
@@ -1015,7 +1015,13 @@ public final class MatchAnimator {
             fromStack = modFromStack;
             scope = modScope;
             entering = modEntering;
-            leaving = modLeaving;
+            // Read now rather than trusting what the burst opened with. A permanent's zone
+            // change is announced at the end of the move, after the static abilities it was
+            // holding up have already been recomputed and reported - so when a lord dies,
+            // the team shrinking is announced before the lord is known to have gone. Waiting
+            // until the burst is shown puts the two back in the right order.
+            leaving = modLeaving || departedSinceFlush;
+            departedSinceFlush = false;
             pendingMods.clear();
             modSource = null;
             modScope = null;
