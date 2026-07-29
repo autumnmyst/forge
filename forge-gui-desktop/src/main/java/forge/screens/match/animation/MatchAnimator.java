@@ -1623,7 +1623,7 @@ public final class MatchAnimator {
      * line per change considered and a line per burst shown, which together say whether a
      * missing spark was never noticed, noticed and dropped, or shown but not as a sweep.
      */
-    private static final boolean TRACE_MODS = false;
+    private static final boolean TRACE_MODS = true;
 
     /**
      * A panel has just been built for a card that is entering play: hide it, so nothing
