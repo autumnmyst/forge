@@ -179,6 +179,9 @@ public final class MatchAnimator {
             // The display has caught up, so damage no longer owns anything's appearance
             // and the next change to these cards is a change in its own right.
             damageClaimed.clear();
+            // Same for the departure a change would be judged against. Cleared by each
+            // burst too, but a death that changes nothing queues no burst to clear it.
+            departedSinceFlush = false;
         });
     }
 
@@ -420,6 +423,9 @@ public final class MatchAnimator {
                 }
             } else if (from == ZoneType.Battlefield) {
                 departing.put(card.getId(), to);
+                if (to != ZoneType.Battlefield && to != ZoneType.Stack) {
+                    departedSinceFlush = true;
+                }
             }
         }
     }
@@ -784,20 +790,17 @@ public final class MatchAnimator {
     private boolean modLeaving;
 
     /**
-     * Whether anything is on its way off the battlefield right now.
+     * Whether a permanent has left a battlefield since the last burst of changes was
+     * shown, which is what says a continuous effect is letting go rather than taking hold.
      * <p>
-     * Not simply whether {@code departing} has entries: a land being played is recorded
-     * there too, so that leaving hand is not mistaken for dying, and that is an arrival
-     * rather than a departure.
+     * Deliberately not read off {@code departing}. That map is display bookkeeping - an
+     * entry lives there until the deferred refresh takes the panel away - so asking it
+     * answered "did anything leave at some point in the backlog we have not drawn yet",
+     * not "is something leaving now". A permanent removed and played again still had its
+     * own departure sitting there when it returned, so its static ability taking hold was
+     * read as letting go: sparks, but never the sweep.
      */
-    private boolean anyLeavingBattlefield() {
-        for (final ZoneType to : departing.values()) {
-            if (to != ZoneType.Battlefield && to != ZoneType.Stack) {
-                return true;
-            }
-        }
-        return false;
-    }
+    private volatile boolean departedSinceFlush;
 
     /**
      * The characteristics each card was last seen with.
@@ -902,8 +905,8 @@ public final class MatchAnimator {
         final boolean leaving;
         synchronized (this) {
             entering = !arriving.isEmpty();
-            leaving = anyLeavingBattlefield();
         }
+        leaving = departedSinceFlush;
         final boolean first;
         synchronized (pendingMods) {
             final ModRecord m = pendingMods.computeIfAbsent(card.getId(), k -> new ModRecord(card));
@@ -918,15 +921,14 @@ public final class MatchAnimator {
                 modFromStack = modSource != null;
                 modEntering = entering;
                 modLeaving = leaving;
-                // The slot is taken now, on the game thread, so the wait below cannot let
-                // anything overtake this burst - the sweep still lands where the effect
-                // that caused it did. Filling it is what waits.
-                modStep = new AnimationStep("modify").reserved();
             }
         }
         if (first) {
-            queue.enqueue(modStep);
-            clock.start();
+            // Deliberately not holding a place in the queue while this gathers. A static
+            // ability takes hold while the permanent carrying it is being put onto the
+            // battlefield, which is announced before the zone change is - so a slot taken
+            // here is taken ahead of that permanent's own arrival, and the board flashed
+            // before the card that did it had appeared.
             final Timer coalesce = new Timer(MOD_COALESCE_MS, e -> flushMods());
             coalesce.setRepeats(false);
             coalesce.start();
@@ -946,9 +948,6 @@ public final class MatchAnimator {
      * Two frames is longer than those gaps and shorter than anything a player can see.
      */
     private static final int MOD_COALESCE_MS = 32;
-
-    /** The queue slot held for the burst being gathered. */
-    private AnimationStep modStep;
 
     /**
      * Cards damage has claimed the visual for, until the display catches up.
@@ -978,19 +977,13 @@ public final class MatchAnimator {
         final Resolution scope;
         final boolean entering;
         final boolean leaving;
-        final AnimationStep step;
-        final boolean reserved;
         synchronized (pendingMods) {
             modFlushQueued = false;
-            reserved = modStep != null;
-            step = reserved ? modStep : new AnimationStep("modify");
-            modStep = null;
+            // Whatever left the battlefield has now been accounted for, whether or not it
+            // changed anything. Left set, it would make the next effect - a lord entering
+            // and giving a board a keyword - read as an effect wearing off instead.
+            departedSinceFlush = false;
             if (pendingMods.isEmpty()) {
-                // Nothing gathered after all; release the slot rather than leave the queue
-                // waiting on it until the reservation times out.
-                if (reserved) {
-                    step.seal();
-                }
                 return;
             }
             mods = new ArrayList<>(pendingMods.values());
@@ -1032,6 +1025,7 @@ public final class MatchAnimator {
         final Point origin = travelled ? trailOrigin(source, fromStack) : null;
         final long arriveMs = Math.round(BEAM_MS * BEAM_ARRIVAL);
 
+        final AnimationStep step = new AnimationStep("modify");
         final Map<PlayerView, Integer> perController = new LinkedHashMap<>();
         final List<ModRecord> visible = new ArrayList<>(mods.size());
         for (final ModRecord m : mods) {
@@ -1119,15 +1113,10 @@ public final class MatchAnimator {
             step.add(CallbackAnim.at(sparkAt, () -> thawCard(m.card)));
         }
 
-        // The slot was taken when the burst opened, so this only has to release it. An
-        // empty one still plays, harmlessly and instantly, rather than being dropped -
-        // the queue is already holding the place.
-        if (reserved) {
-            step.seal();
-        } else {
+        if (!step.isEmpty()) {
             queue.enqueue(step);
+            clock.start();
         }
-        clock.start();
     }
 
     /** Whether a card is on its way onto a battlefield and has not been shown there yet. */
