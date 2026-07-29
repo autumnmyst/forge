@@ -18,6 +18,7 @@ import java.util.concurrent.Executors;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
+import javax.swing.Timer;
 
 import forge.card.MagicColor;
 import forge.game.GameEntityView;
@@ -917,12 +918,37 @@ public final class MatchAnimator {
                 modFromStack = modSource != null;
                 modEntering = entering;
                 modLeaving = leaving;
+                // The slot is taken now, on the game thread, so the wait below cannot let
+                // anything overtake this burst - the sweep still lands where the effect
+                // that caused it did. Filling it is what waits.
+                modStep = new AnimationStep("modify").reserved();
             }
         }
         if (first) {
-            FThreads.invokeInEdtLater(this::flushMods);
+            queue.enqueue(modStep);
+            clock.start();
+            final Timer coalesce = new Timer(MOD_COALESCE_MS, e -> flushMods());
+            coalesce.setRepeats(false);
+            coalesce.start();
         }
     }
+
+    /**
+     * How long to let a burst of changes gather before showing it.
+     * <p>
+     * An effect that changes several permanents does not always announce them together.
+     * A pump fires an event per creature back to back, which never splits, but a counter
+     * fires two events per card and runs that card's triggers before moving on - enough
+     * of a gap for the flush to be serviced in the middle of the effect. The board then
+     * saw one creature change, and then the rest as a separate event, which is neither
+     * the right count for a sweep nor the right beat for the sparks.
+     * <p>
+     * Two frames is longer than those gaps and shorter than anything a player can see.
+     */
+    private static final int MOD_COALESCE_MS = 32;
+
+    /** The queue slot held for the burst being gathered. */
+    private AnimationStep modStep;
 
     /**
      * Cards damage has claimed the visual for, until the display catches up.
@@ -952,9 +978,19 @@ public final class MatchAnimator {
         final Resolution scope;
         final boolean entering;
         final boolean leaving;
+        final AnimationStep step;
+        final boolean reserved;
         synchronized (pendingMods) {
             modFlushQueued = false;
+            reserved = modStep != null;
+            step = reserved ? modStep : new AnimationStep("modify");
+            modStep = null;
             if (pendingMods.isEmpty()) {
+                // Nothing gathered after all; release the slot rather than leave the queue
+                // waiting on it until the reservation times out.
+                if (reserved) {
+                    step.seal();
+                }
                 return;
             }
             mods = new ArrayList<>(pendingMods.values());
@@ -996,7 +1032,6 @@ public final class MatchAnimator {
         final Point origin = travelled ? trailOrigin(source, fromStack) : null;
         final long arriveMs = Math.round(BEAM_MS * BEAM_ARRIVAL);
 
-        final AnimationStep step = new AnimationStep("modify");
         final Map<PlayerView, Integer> perController = new LinkedHashMap<>();
         final List<ModRecord> visible = new ArrayList<>(mods.size());
         for (final ModRecord m : mods) {
@@ -1010,7 +1045,14 @@ public final class MatchAnimator {
             // there, so there is no change for a spark to mark - not before it lands and
             // not after either. It still counts towards the sweep below, because the
             // effect did reach that board, and it is thawed in case the freeze caught it.
-            if (panel.getRenderAlpha() <= 0f) {
+            //
+            // Asked of the arrival rather than of the panel's opacity. A hidden panel is
+            // not only a card that has yet to appear: one being carried to a new slot is
+            // hidden too, while an overlay copy makes the journey. So every change that
+            // landed as the board re-laid itself out was thrown away - which is most of
+            // them, since a permanent leaving or joining is exactly what shuffles the
+            // board and exactly what makes a static ability let go or take hold.
+            if (isAwaitingArrival(m.card)) {
                 thawCard(m.card);
             } else {
                 visible.add(m);
@@ -1077,9 +1119,24 @@ public final class MatchAnimator {
             step.add(CallbackAnim.at(sparkAt, () -> thawCard(m.card)));
         }
 
-        if (!step.isEmpty()) {
+        // The slot was taken when the burst opened, so this only has to release it. An
+        // empty one still plays, harmlessly and instantly, rather than being dropped -
+        // the queue is already holding the place.
+        if (reserved) {
+            step.seal();
+        } else {
             queue.enqueue(step);
-            clock.start();
+        }
+        clock.start();
+    }
+
+    /** Whether a card is on its way onto a battlefield and has not been shown there yet. */
+    private boolean isAwaitingArrival(final CardView card) {
+        if (card == null) {
+            return false;
+        }
+        synchronized (this) {
+            return pendingArrivals.containsKey(card.getId());
         }
     }
 
