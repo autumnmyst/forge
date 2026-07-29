@@ -52,6 +52,7 @@ import forge.screens.match.views.VField;
 import forge.screens.match.views.VHand;
 import forge.util.collect.FCollectionView;
 import forge.view.arcane.CardPanel;
+import forge.view.arcane.HandArea;
 
 /**
  * Owns the animation system for one match and translates game events into motion.
@@ -411,15 +412,10 @@ public final class MatchAnimator {
                 clock.start();
                 FThreads.invokeInEdtLater(() -> claimAwaitingPanel(card, from));
                 if (from == ZoneType.Hand) {
-                    // A land: its origin is the card still sitting in hand, so the hand
-                    // panel has to be measured before the zone refresh takes it away.
+                    // A land. Recorded so that its hand panel going is understood as the
+                    // start of an arrival rather than as a death, whichever of the arrival
+                    // step and the deferred refresh gets there first.
                     departing.put(card.getId(), ZoneType.Battlefield);
-                    // And taken out of the hand now rather than by the deferred refresh,
-                    // which waits behind every animation this play set off. A land with a
-                    // trigger could sit in hand for the whole of its own arrival, so the
-                    // card was in two places at once - a basic land only looked right
-                    // because nothing was queued to hold the refresh up.
-                    FThreads.invokeInEdtLater(() -> removeFromHand(card));
                 }
             } else if (from == ZoneType.Battlefield) {
                 departing.put(card.getId(), to);
@@ -790,8 +786,8 @@ public final class MatchAnimator {
      * Whether anything is on its way off the battlefield right now.
      * <p>
      * Not simply whether {@code departing} has entries: a land being played is recorded
-     * there too, so that its origin can be measured in hand before the refresh takes it
-     * away, and that is an arrival rather than a departure.
+     * there too, so that leaving hand is not mistaken for dying, and that is an arrival
+     * rather than a departure.
      */
     private boolean anyLeavingBattlefield() {
         for (final ZoneType to : departing.values()) {
@@ -1075,18 +1071,29 @@ public final class MatchAnimator {
     }
 
     /**
-     * Take a card out of the hand it has just been played from.
+     * Take a card out of the hand it has just been played from, and close the hand up.
      * <p>
      * Goes through the container's own removal so the card is still seen leaving - that
      * hook is what copies the panel for its departure - and the deferred refresh that
      * follows simply finds it already gone.
+     * <p>
+     * The relayout is the point of doing this at all. Removing a panel invalidates the
+     * hand without revalidating it, so the cards that are left keep the bounds they had
+     * and a hole sits where the played card was until the deferred refresh rebuilds the
+     * row. Validating here is the same sequence that refresh ends with.
      */
     private void removeFromHand(final CardView card) {
         for (final VHand h : matchUI.getHandViews()) {
             try {
-                final CardPanel p = h.getHandArea().getCardPanel(card.getId());
+                final HandArea area = h.getHandArea();
+                final CardPanel p = area.getCardPanel(card.getId());
                 if (p != null) {
-                    h.getHandArea().removeCardPanel(p);
+                    area.removeCardPanel(p);
+                    area.invalidate();
+                    if (area.getParent() != null) {
+                        area.getParent().validate();
+                    }
+                    area.repaint();
                     return;
                 }
             } catch (final RuntimeException ignored) {
@@ -1674,6 +1681,17 @@ public final class MatchAnimator {
             clock.addFree(PanelAnim.fadeIn(panel, 320));
         };
         final AnimationStep step = new AnimationStep("arrive:" + card.getName()).after(reveal);
+        if (from == ZoneType.Hand) {
+            // The card leaves the hand exactly as its trail sets off, rather than when the
+            // game moved it. Removing it any earlier put it in neither place for the length
+            // of the arrival, and the deferred zone refresh - which is what would otherwise
+            // close the hand up - waits behind every animation the play set off.
+            //
+            // Nothing here needs the hand panel: a card entering from a hand is drawn out
+            // of its owner's avatar, since the hand itself is not visible from both sides
+            // of the table. See originFor.
+            step.before(() -> removeFromHand(card));
+        }
         step.add(new BeamAnim(
                 () -> originFor(from, card),
                 () -> centreOf(panelForArrival(card)),
