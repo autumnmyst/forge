@@ -948,6 +948,12 @@ public final class MatchAnimator {
         final boolean entering;
         final boolean leaving;
         synchronized (pendingMods) {
+            if (modScope != null && resolving == modScope) {
+                // Still mid-resolution, and it announces what it changed a card at a time.
+                // Left armed rather than flushed, so nothing else queues a second pass:
+                // endResolution posts this again once the whole effect has been announced.
+                return;
+            }
             modFlushQueued = false;
             if (pendingMods.isEmpty()) {
                 return;
@@ -1034,6 +1040,14 @@ public final class MatchAnimator {
             if (controller != null) {
                 perController.merge(controller, 1, Integer::sum);
             }
+        }
+
+        if (TRACE_MODS) {
+            System.out.println("[anim] mods=" + mods.size() + " visible=" + visible.size()
+                    + " applied=" + applied + " scope=" + (scope == null ? "null" : nameOf(scope.source))
+                    + " entering=" + entering + " leaving=" + leaving
+                    + " perController=" + perController.values()
+                    + " threshold=" + BOARD_EFFECT_THRESHOLD);
         }
 
         long sparkAt = 0L;
@@ -1403,7 +1417,7 @@ public final class MatchAnimator {
                 queue.enqueue(step);
                 clock.start();
             }
-            resolving = null;
+            endResolution();
             return;
         }
         // Claim the slot here, on the game thread, before returning. A resolution's own
@@ -1421,7 +1435,32 @@ public final class MatchAnimator {
                 step.seal();
             }
         });
+        endResolution();
+    }
+
+    /**
+     * Close the open resolution, and show anything it changed.
+     * <p>
+     * A resolution that changes several permanents announces them one at a time - a pump
+     * fires an event per creature, and counters fire two - with trigger handling in
+     * between. The flush those changes queue runs on the EDT, so it could land in one of
+     * those gaps and show part of the effect: the first creature sparked on its own, and
+     * the rest a moment later as a separate event. Two of one thing rather than one of
+     * two, which is exactly what decides whether an effect reads as covering a board.
+     * <p>
+     * So a burst opened by a resolution waits for that resolution to finish, which is
+     * here. Changes with nothing resolving behind them - a static taking hold as a
+     * permanent enters - are unaffected and still flush on the next pass.
+     */
+    private void endResolution() {
         resolving = null;
+        final boolean pending;
+        synchronized (pendingMods) {
+            pending = modFlushQueued && !pendingMods.isEmpty();
+        }
+        if (pending) {
+            FThreads.invokeInEdtLater(this::flushMods);
+        }
     }
 
     /**
@@ -1618,6 +1657,9 @@ public final class MatchAnimator {
 
     /** Set true to trace why a card entering play did or did not get an arrival beam. */
     private static final boolean TRACE_ARRIVALS = false;
+
+    /** Set true to trace why a burst of changes did or did not sweep a board. */
+    private static final boolean TRACE_MODS = false;
 
     /**
      * A panel has just been built for a card that is entering play: hide it, so nothing
