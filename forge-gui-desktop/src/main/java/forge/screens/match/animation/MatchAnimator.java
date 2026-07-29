@@ -225,6 +225,7 @@ public final class MatchAnimator {
         soundThread.shutdownNow();
         queue.skipAll();
         departing.clear();
+        departedSinceFlush = false;
         arriving.clear();
         arrivedFrom.clear();
         pendingArrivals.clear();
@@ -419,6 +420,9 @@ public final class MatchAnimator {
                 }
             } else if (from == ZoneType.Battlefield) {
                 departing.put(card.getId(), to);
+                if (to != ZoneType.Battlefield && to != ZoneType.Stack) {
+                    departedSinceFlush = true;
+                }
             }
         }
     }
@@ -783,20 +787,16 @@ public final class MatchAnimator {
     private boolean modLeaving;
 
     /**
-     * Whether anything is on its way off the battlefield right now.
+     * Whether a permanent has left a battlefield since the last burst of changes was
+     * shown, which is what says a continuous effect is letting go rather than taking hold.
      * <p>
-     * Not simply whether {@code departing} has entries: a land being played is recorded
-     * there too, so that leaving hand is not mistaken for dying, and that is an arrival
-     * rather than a departure.
+     * Deliberately not read off {@code departing}, which is display bookkeeping: an entry
+     * there lives until the deferred refresh takes the panel away, so asking it meant
+     * "something left at some point in the backlog we have not drawn yet" rather than
+     * "something is leaving now". One creature dying suppressed the board sweep on every
+     * effect that followed it until the queue ran dry.
      */
-    private boolean anyLeavingBattlefield() {
-        for (final ZoneType to : departing.values()) {
-            if (to != ZoneType.Battlefield && to != ZoneType.Stack) {
-                return true;
-            }
-        }
-        return false;
-    }
+    private volatile boolean departedSinceFlush;
 
     /**
      * The characteristics each card was last seen with.
@@ -896,8 +896,8 @@ public final class MatchAnimator {
         final boolean leaving;
         synchronized (this) {
             entering = !arriving.isEmpty();
-            leaving = anyLeavingBattlefield();
         }
+        leaving = departedSinceFlush;
         final boolean first;
         synchronized (pendingMods) {
             final ModRecord m = pendingMods.computeIfAbsent(card.getId(), k -> new ModRecord(card));
@@ -964,6 +964,9 @@ public final class MatchAnimator {
             modEntering = false;
             modLeaving = false;
         }
+        // The departure this burst was measured against has been accounted for; the next
+        // burst is judged on what leaves after this one, not on the same death again.
+        departedSinceFlush = false;
 
         // Whether this was an effect being applied or one wearing off. Only an
         // application sweeps a board: something being put onto everything at once is a
@@ -995,17 +998,28 @@ public final class MatchAnimator {
         final Map<PlayerView, Integer> perController = new LinkedHashMap<>();
         final List<ModRecord> visible = new ArrayList<>(mods.size());
         for (final ModRecord m : mods) {
-            final CardPanel panel = findPanel(m.card);
-            if (panel == null || centreOf(panel) == null) {
-                continue;
-            }
             // Nothing to spark on a card that is not on screen yet. A planeswalker is
             // given its loyalty on the way in, and anything entering with counters or
             // under a lord is in the same position: the card arrives with it already
             // there, so there is no change for a spark to mark - not before it lands and
             // not after either. It still counts towards the sweep below, because the
             // effect did reach that board, and it is thawed in case the freeze caught it.
-            if (panel.getRenderAlpha() <= 0f) {
+            //
+            // Having no panel at all is that same case, not a different one - a token
+            // created under a lord is modified before anything has been built to draw it
+            // on. Told apart from a card that simply is not here by asking the game where
+            // the card is rather than by asking what the display has caught up with:
+            // dropping these was what stopped a lord reaching a board full of tokens from
+            // reading as a sweep, since none of them counted.
+            final CardPanel panel = findPanel(m.card);
+            if (panel == null) {
+                if (m.card.getZone() != ZoneType.Battlefield) {
+                    continue;
+                }
+                thawCard(m.card);
+            } else if (centreOf(panel) == null) {
+                continue;
+            } else if (panel.getRenderAlpha() <= 0f) {
                 thawCard(m.card);
             } else {
                 visible.add(m);
