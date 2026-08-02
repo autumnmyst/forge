@@ -207,6 +207,26 @@ public class ImageUtil {
     }
 
     public static String getScryfallDownloadUrl(PaperCard cp, String face, String setCode, String langCode, boolean useArtCrop) {
+        return getScryfallDownloadUrl(cp, face, setCode, langCode, useArtCrop, "normal");
+    }
+
+    /**
+     * @param imageVersion Scryfall image version to request when not using art crop,
+     *                     e.g. {@code "normal"} for standard resolution or {@code "png"}
+     *                     for the highest resolution Scryfall offers.
+     */
+    public static String getScryfallDownloadUrl(PaperCard cp, String face, String setCode, String langCode, boolean useArtCrop, String imageVersion) {
+        return getScryfallDownloadUrl(cp, face, setCode, langCode, useArtCrop, imageVersion, false);
+    }
+
+    /**
+     * @param meldUseOwnNumber for a meld back face, derive the collector number from this
+     *                         card rather than from its meld partner. Scryfall numbers the
+     *                         meld result after one half of the pair, but which half varies
+     *                         by set (EMN/INR use the partner, SIR uses this card), so
+     *                         callers that can try more than one URL should try both.
+     */
+    public static String getScryfallDownloadUrl(PaperCard cp, String face, String setCode, String langCode, boolean useArtCrop, String imageVersion, boolean meldUseOwnNumber) {
         final Pattern funnyCardCollectorNumberPattern = Pattern.compile("^F\\d+");
         String editionCode;
         if (setCode != null && !setCode.isEmpty())
@@ -230,12 +250,29 @@ public class ImageUtil {
             cardCollectorNumber = cardCollectorNumber.substring(1);
         }
 
-        String versionParam = useArtCrop ? "art_crop" : "normal";
+        // Some Forge sets are groupings that don't exist on Scryfall (e.g. Resale Promos),
+        // so their printings declare where the image really lives.
+        StaticData data = StaticData.instance();
+        if (data != null) {
+            CardEdition ownEdition = data.getEditions().get(cp.getEdition());
+            if (ownEdition != null) {
+                String[] override = ownEdition.getScryfallOverride(cp.getCollectorNumber());
+                if (override != null) {
+                    editionCode = override[0];
+                    cardCollectorNumber = override[1];
+                }
+            }
+        }
+
+        String versionParam = useArtCrop ? "art_crop" : imageVersion;
         String faceParam = "";
 
         if (cp.getRules().getSplitType() == CardSplitType.Meld) {
             if (face.equals("back")) {
-                cardCollectorNumber = cp.getMeldBaseCard().getCollectorNumber().replaceAll("(\\d+)([sp]?)", "$1b$2");
+                // getMeldBaseCard() returns null when the partner isn't on a print sheet.
+                PaperCard meldBase = meldUseOwnNumber ? null : cp.getMeldBaseCard();
+                String meldNumber = meldBase != null ? meldBase.getCollectorNumber() : cardCollectorNumber;
+                cardCollectorNumber = meldNumber.replaceAll("(\\d+)([sp]?)", "$1b$2");
             }
 
             faceParam = "&face=front";
@@ -262,7 +299,16 @@ public class ImageUtil {
     }
 
     public static String getScryfallTokenDownloadUrl(String collectorNumber, String setCode, String langCode, String faceParam) {
-        String versionParam = "normal";
+        return getScryfallTokenDownloadUrl(collectorNumber, setCode, langCode, faceParam, "normal");
+    }
+
+    /**
+     * @param imageVersion Scryfall image version to request, e.g. {@code "normal"}
+     *                     for standard resolution or {@code "png"} for the highest
+     *                     resolution Scryfall offers.
+     */
+    public static String getScryfallTokenDownloadUrl(String collectorNumber, String setCode, String langCode, String faceParam, String imageVersion) {
+        String versionParam = imageVersion;
         if (!faceParam.isEmpty()) {
             faceParam = (faceParam.equals("back") ? "&face=back" : "&face=front");
         }

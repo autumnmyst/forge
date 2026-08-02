@@ -14,6 +14,7 @@ import forge.StaticData;
 import forge.gui.GuiBase;
 import forge.gui.SOverlayUtils;
 import forge.gui.UiCommand;
+import forge.gui.download.CardImageAudit;
 import forge.gui.framework.DragCell;
 import forge.gui.framework.DragTab;
 import forge.gui.framework.EDocID;
@@ -62,6 +63,11 @@ public enum VSubmenuDownloaders implements IVSubmenu<CSubmenuDownloaders> {
     private final FLabel btnDownloadAchievementImages = _makeButton(localizer.getMessage("btnDownloadAchievementImages"));
     private final FLabel btnReportBug                 = _makeButton(localizer.getMessage("btnReportBug"));
     private final FLabel btnListImageData             = _makeButton(localizer.getMessage("btnListImageData"));
+    private final FLabel btnDownloadMissingImages     = _makeButton(localizer.getMessage("btnDownloadMissingImages"));
+    private final FLabel btnDownloadMissingImagesMax  = _makeButton(localizer.getMessage("btnDownloadMissingImagesMax"));
+    private final FLabel btnAuditCardImageRes         = _makeButton(localizer.getMessage("btnAuditCardImageRes"));
+    private final FLabel btnUpgradeCardImages         = _makeButton(localizer.getMessage("btnUpgradeCardImages"));
+    private final FLabel btnDownloadMissingImagesFast = _makeButton(localizer.getMessage("btnDownloadMissingImagesFast"));
     private final FLabel btnImportPictures            = _makeButton(localizer.getMessage("btnImportPictures"));
     private final FLabel btnHowToPlay                 = _makeButton(localizer.getMessage("btnHowToPlay"));
     private final FLabel btnDownloadPrices            = _makeButton(localizer.getMessage("btnDownloadPrices"));
@@ -109,6 +115,21 @@ public enum VSubmenuDownloaders implements IVSubmenu<CSubmenuDownloaders> {
         pnlContent.add(btnListImageData, constraintsBTN);
         pnlContent.add(_makeLabel(localizer.getMessage("lblListImageData")), constraintsLBL);
 
+        pnlContent.add(btnDownloadMissingImages, constraintsBTN);
+        pnlContent.add(_makeLabel(localizer.getMessage("lblDownloadMissingImages")), constraintsLBL);
+
+        pnlContent.add(btnDownloadMissingImagesMax, constraintsBTN);
+        pnlContent.add(_makeLabel(localizer.getMessage("lblDownloadMissingImagesMax")), constraintsLBL);
+
+        pnlContent.add(btnDownloadMissingImagesFast, constraintsBTN);
+        pnlContent.add(_makeLabel(localizer.getMessage("lblDownloadMissingImagesFast")), constraintsLBL);
+
+        pnlContent.add(btnAuditCardImageRes, constraintsBTN);
+        pnlContent.add(_makeLabel(localizer.getMessage("lblAuditCardImageRes")), constraintsLBL);
+
+        pnlContent.add(btnUpgradeCardImages, constraintsBTN);
+        pnlContent.add(_makeLabel(localizer.getMessage("lblUpgradeCardImages")), constraintsLBL);
+
         pnlContent.add(btnImportPictures, constraintsBTN);
         pnlContent.add(_makeLabel(localizer.getMessage("lblImportPictures")), constraintsLBL);
 
@@ -152,6 +173,11 @@ public enum VSubmenuDownloaders implements IVSubmenu<CSubmenuDownloaders> {
     public void setDownloadAchievementImagesCommand(UiCommand command) { btnDownloadAchievementImages.setCommand(command); }
     public void setReportBugCommand(UiCommand command)                 { btnReportBug.setCommand(command);           }
     public void setListImageDataCommand(UiCommand command)             { btnListImageData.setCommand(command);       }
+    public void setDownloadMissingImagesCommand(UiCommand command)     { btnDownloadMissingImages.setCommand(command); }
+    public void setDownloadMissingImagesMaxCommand(UiCommand command)  { btnDownloadMissingImagesMax.setCommand(command); }
+    public void setAuditCardImageResCommand(UiCommand command)         { btnAuditCardImageRes.setCommand(command);   }
+    public void setUpgradeCardImagesCommand(UiCommand command)         { btnUpgradeCardImages.setCommand(command);   }
+    public void setDownloadMissingImagesFastCommand(UiCommand command)     { btnDownloadMissingImagesFast.setCommand(command); }
     public void setImportPicturesCommand(UiCommand command)            { btnImportPictures.setCommand(command);      }
     public void setHowToPlayCommand(UiCommand command)                 { btnHowToPlay.setCommand(command);           }
     public void setDownloadPricesCommand(UiCommand command)            { btnDownloadPrices.setCommand(command);      }
@@ -235,6 +261,75 @@ public enum VSubmenuDownloaders implements IVSubmenu<CSubmenuDownloaders> {
             auditUpdate(tar, scr);
             scr.getViewport().setViewPosition(new Point(0, 0));
         });
+    }
+
+    /** Reports the PNG (max res) vs JPG (normal res) split of the cached images. */
+    public void showCardImageResolutionAudit() {
+        final FTextArea tar = new FTextArea("Scanning cached card images. Please wait...");
+        tar.setOpaque(true);
+        tar.setLineWrap(false);
+        tar.setWrapStyleWord(false);
+        tar.setEditable(false);
+        tar.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+
+        tar.setFont(FSkin.getRelativeFixedFont(12));
+        tar.setForeground(FSkin.getColor(FSkin.Colors.CLR_TEXT));
+        tar.setBackground(FSkin.getColor(FSkin.Colors.CLR_THEME2));
+
+        final FScrollPane scr = new FScrollPane(tar, true, ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED,
+                ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED);
+
+        _showDialog(scr, () -> {
+            final CardImageAudit.Result result = CardImageAudit.scan();
+            final StringBuilder sb = new StringBuilder();
+            appendCounts(sb, "Cards", result.getCards());
+            appendCounts(sb, "Tokens", result.getTokens());
+            appendCounts(sb, "Total", result.getCombined());
+            appendNames(sb, "CARDS", result.getCards());
+            appendNames(sb, "TOKENS", result.getTokens());
+
+            final String report = sb.toString();
+            tar.setText(report);
+            tar.setCaretPosition(0);
+            scr.getViewport().setViewPosition(new Point(0, 0));
+
+            final FButton btnClipboardCopy = new FButton(localizer.getMessage("btnCopyToClipboard"));
+            btnClipboardCopy.addActionListener(arg0 -> {
+                GuiBase.getInterface().copyToClipboard(report);
+                SOverlayUtils.hideOverlay();
+            });
+            scr.getParent().add(btnClipboardCopy, "w 200!, h pref+12!, center, gaptop 10");
+
+            FOverlay.SINGLETON_INSTANCE.getPanel().validate();
+            FOverlay.SINGLETON_INSTANCE.getPanel().repaint();
+        });
+    }
+
+    /** Lists the normal-resolution images, so they can be found and replaced. */
+    private static void appendNames(StringBuilder sb, String label, CardImageAudit.Counts counts) {
+        final java.util.List<String> names = counts.getJpgNames();
+        if (names.isEmpty()) {
+            return;
+        }
+        sb.append("\n-------------------------------\n");
+        sb.append("NORMAL RESOLUTION (JPG) - ").append(label).append('\n');
+        sb.append("-------------------------------\n\n");
+        for (final String n : names) {
+            sb.append("    ").append(n).append('\n');
+        }
+    }
+
+    private static void appendCounts(StringBuilder sb, String label, CardImageAudit.Counts counts) {
+        final int total = counts.getTotal();
+        sb.append(label).append('\n');
+        if (total == 0) {
+            sb.append("  no cached images\n\n");
+            return;
+        }
+        sb.append(String.format("  PNG (max res)     %d / %d   %.1f%%%n",
+                counts.getPng(), total, counts.getPngPercent()));
+        sb.append(String.format("  JPG (normal res)  %d / %d   %.1f%%%n%n",
+                counts.getJpg(), total, counts.getJpgPercent()));
     }
 
     public void showLicensing() {

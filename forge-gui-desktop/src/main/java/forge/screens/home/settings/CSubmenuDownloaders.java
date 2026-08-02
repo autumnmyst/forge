@@ -8,6 +8,8 @@ import forge.download.GuiDownloader;
 import forge.gui.ImportDialog;
 import forge.gui.UiCommand;
 import forge.gui.download.GuiDownloadAchievementImages;
+import forge.gui.download.GuiDownloadCardImages;
+import forge.gui.download.GuiDownloadCardImagesBulk;
 import forge.gui.download.GuiDownloadPicturesHQ;
 import forge.gui.download.GuiDownloadPicturesLQ;
 import forge.gui.download.GuiDownloadPrices;
@@ -44,6 +46,12 @@ public enum CSubmenuDownloaders implements ICDoc {
     private final UiCommand cmdDownloadSkins = () -> new GuiDownloader(new GuiDownloadSkins()).show();
     private final UiCommand cmdHowToPlay = VSubmenuDownloaders.SINGLETON_INSTANCE::showHowToPlay;
     private final UiCommand cmdListImageData = VSubmenuDownloaders.SINGLETON_INSTANCE::showCardandImageAuditData;
+    private final UiCommand cmdDownloadMissingImages = () -> new GuiDownloader(new GuiDownloadCardImages(false)).show();
+    private final UiCommand cmdDownloadMissingImagesMax = () -> new GuiDownloader(new GuiDownloadCardImages(true)).show();
+    private final UiCommand cmdAuditCardImageRes = VSubmenuDownloaders.SINGLETON_INSTANCE::showCardImageResolutionAudit;
+    private final UiCommand cmdUpgradeCardImages = () -> new GuiDownloader(
+            new GuiDownloadCardImages(GuiDownloadCardImages.Mode.UPGRADE_TO_MAX)).show();
+    private final UiCommand cmdDownloadMissingImagesFast = () -> new GuiDownloader(new GuiDownloadCardImagesBulk()).show();
     private final UiCommand cmdImportPictures = () -> new ImportDialog(null, null).show();
     private final UiCommand cmdReportBug = () -> BugReporter.reportBug(null);
 
@@ -64,6 +72,11 @@ public enum CSubmenuDownloaders implements ICDoc {
         view.setDownloadQuestImagesCommand(cmdQuestImages);
         view.setDownloadAchievementImagesCommand(cmdAchievementImages);
         view.setListImageDataCommand(cmdListImageData);
+        view.setDownloadMissingImagesCommand(cmdDownloadMissingImages);
+        view.setDownloadMissingImagesMaxCommand(cmdDownloadMissingImagesMax);
+        view.setAuditCardImageResCommand(cmdAuditCardImageRes);
+        view.setUpgradeCardImagesCommand(cmdUpgradeCardImages);
+        view.setDownloadMissingImagesFastCommand(cmdDownloadMissingImagesFast);
         view.setReportBugCommand(cmdReportBug);
         view.setImportPicturesCommand(cmdImportPictures);
         view.setHowToPlayCommand(cmdHowToPlay);

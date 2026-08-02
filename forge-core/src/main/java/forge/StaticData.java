@@ -3,6 +3,7 @@ package forge;
 import forge.card.CardDb;
 import forge.card.CardEdition;
 import forge.card.CardRules;
+import forge.card.CardSplitType;
 import forge.card.PrintSheet;
 import forge.item.*;
 import forge.token.TokenDb;
@@ -27,6 +28,9 @@ import java.util.stream.Collectors;
  * @author Max
  */
 public class StaticData {
+    /** The five faces a Specialize card can take, as ImageUtil names them. */
+    private static final String[] SPECIALIZE_FACES = { "white", "blue", "black", "red", "green" };
+
     private final CardStorageReader cardReader;
     private final CardStorageReader tokenReader;
     private final String blockDataFolder;
@@ -818,6 +822,23 @@ public class StaticData {
                             NIF_Q.add(e.getCode() + "_" + imagePath + "\n");
                         }
                     }
+                    // check the specialize faces - each is its own image, and
+                    // hasBackFace() does not report them
+                    if (cp.getRules().getSplitType() == CardSplitType.Specialize) {
+                        for (String specFace : SPECIALIZE_FACES) {
+                            String specPath = ImageUtil.getImageRelativePath(cp, specFace, true, false);
+                            if (specPath == null || specPath.isEmpty()) {
+                                continue;
+                            }
+                            File specFile = ImageKeys.getImageFile(specPath);
+                            if (specFile == null && ImageKeys.hasSetLookup(specPath))
+                                specFile = ImageKeys.setLookUpFile(specPath, specPath + "border");
+                            if (specFile == null) {
+                                EDITION_Q.add(e.getCode() + "_" + e.getName());
+                                NIF_Q.add(e.getCode() + "_" + specPath + "\n");
+                            }
+                        }
+                    }
                     // check the back face
                     if (cp.hasBackFace()) {
                         imagePath = ImageUtil.getImageRelativePath(cp, "back", true, false);
@@ -863,6 +884,21 @@ public class StaticData {
                     }
                 } catch(Exception ex) {
                     System.out.println("No Token found: " + name + " in " + e.getName());
+                }
+            }
+
+            // Audit the [other] section too - emblems, embalm/eternalize helper cards,
+            // monarch, blessing, manifest, morph and friends. These have no PaperToken,
+            // so they are keyed the same way getOtherImageKey() builds them.
+            for(Map.Entry<String, Collection<CardEdition.EditionEntry>> otherEntry : e.getOther().asMap().entrySet()) {
+                final String name = otherEntry.getKey();
+                for(CardEdition.EditionEntry ee : otherEntry.getValue()) {
+                    String imgKey = ImageKeys.getTokenKey(
+                            String.format("%s|%s|%s", name, e.getCode(), ee.collectorNumber()));
+                    if (ImageKeys.getImageFile(imgKey) == null) {
+                        EDITION_Q.add(e.getCode() + "_" + e.getName());
+                        TOKEN_Q.add(e.getCode() + "_" + name + "\n");
+                    }
                 }
             }
         }
