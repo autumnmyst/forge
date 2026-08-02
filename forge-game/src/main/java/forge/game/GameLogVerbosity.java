@@ -4,10 +4,15 @@ import java.util.EnumSet;
 import java.util.Set;
 
 public enum GameLogVerbosity {
+    // REVEAL is here rather than only in MEDIUM because a reveal or a notification can be
+    // the one thing the player was never shown - their interrupt settings decide whether
+    // it stops for them - and the log entry is then the whole of the record. Everything
+    // else low verbosity drops either happened in view or can be read off the board.
     LOW("Low",
         EnumSet.of(GameLogEntryType.GAME_OUTCOME, GameLogEntryType.MATCH_RESULTS,
                    GameLogEntryType.TURN, GameLogEntryType.MULLIGAN,
-                   GameLogEntryType.ANTE, GameLogEntryType.DAMAGE)),
+                   GameLogEntryType.ANTE, GameLogEntryType.DAMAGE,
+                   GameLogEntryType.REVEAL)),
     MEDIUM("Medium",
         EnumSet.of(GameLogEntryType.GAME_OUTCOME, GameLogEntryType.MATCH_RESULTS,
                    GameLogEntryType.TURN, GameLogEntryType.MULLIGAN,
