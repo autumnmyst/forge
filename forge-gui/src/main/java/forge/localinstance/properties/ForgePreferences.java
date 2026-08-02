@@ -350,6 +350,8 @@ public class ForgePreferences extends AbstractPreferences<ForgePreferences.FPref
         // Shift+S rather than a bare key: Space and Enter activate the focused prompt
         // button, and every plain letter that reads as "skip" is already taken.
         SHORTCUT_SKIP_ANIMATIONS("16 83"),
+        // Ctrl+S: yield until the stack is empty, the same thing the stack menu offers.
+        SHORTCUT_YIELD_TO_STACK("17 83"),
 
         LAST_IMPORTED_CUBE_ID(""),
 

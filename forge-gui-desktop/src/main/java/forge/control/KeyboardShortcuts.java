@@ -23,7 +23,9 @@ import forge.game.spellability.StackItemView;
 import forge.gui.framework.EDocID;
 import forge.gui.framework.SDisplayUtil;
 import forge.localinstance.properties.ForgePreferences;
+import forge.game.player.PlayerView;
 import forge.gamemodes.match.YieldController;
+import forge.gamemodes.match.YieldUpdate;
 import forge.localinstance.properties.ForgePreferences.FPref;
 import forge.model.FModel;
 import forge.player.AutoYieldStore.TriggerDecision;
@@ -271,6 +273,20 @@ public class KeyboardShortcuts {
             }
         };
 
+        // The same thing the stack panel's menu offers, without having to open it: hold
+        // priority away until the stack has emptied, interrupts still respected.
+        final Action actYieldToStack = new AbstractAction() {
+            @Override
+            public void actionPerformed(final ActionEvent e) {
+                if (!Singletons.getControl().getCurrentScreen().isMatchScreen()) { return; }
+                if (matchUI == null) { return; }
+                final PlayerView local = matchUI.getCurrentPlayer();
+                if (local == null) { return; }
+                matchUI.getGameController().sendYieldUpdate(new YieldUpdate.StackYield(local, true, true));
+                matchUI.getGameController().passPriority();
+            }
+        };
+
         final Action actSkipAnimations = new AbstractAction() {
             @Override
             public void actionPerformed(final ActionEvent e) {
@@ -303,6 +319,7 @@ public class KeyboardShortcuts {
         list.add(new Shortcut(FPref.SHORTCUT_PANELTABS, localizer.getMessage("lblSHORTCUT_PANELTABS"), actPanelTabs, am, im));
         list.add(new Shortcut(FPref.SHORTCUT_CARDOVERLAYS, localizer.getMessage("lblSHORTCUT_CARDOVERLAYS"), actCardOverlays, am, im));
         list.add(new Shortcut(FPref.SHORTCUT_SKIP_ANIMATIONS, localizer.getMessage("lblSHORTCUT_SKIP_ANIMATIONS"), actSkipAnimations, am, im));
+        list.add(new Shortcut(FPref.SHORTCUT_YIELD_TO_STACK, localizer.getMessage("lblSHORTCUT_YIELD_TO_STACK"), actYieldToStack, am, im));
         cachedShortcuts = list;
         return list;
     } // End initMatchShortcuts()
