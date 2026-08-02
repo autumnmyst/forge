@@ -546,13 +546,42 @@ public final class CMatchUI
 
     @Override
     public void updateZones(final Iterable<PlayerZoneUpdate> zonesToUpdate) {
-        // Wait for the animations already playing before redrawing the board, so a
-        // creature is not gone from the battlefield while its death is still on screen.
+        // Cards arriving on a battlefield get their panels straight away, hidden. Nothing
+        // is shown by that - an arriving card is blanked the moment its panel exists - but
+        // it gives the animator something to aim at, so an arrival can be queued in the
+        // order the card really entered instead of whenever the refresh below happened to
+        // run. Ordering used to depend on that timing, and broke whenever the game ran
+        // ahead of the display.
+        addArrivingPanels(zonesToUpdate);
+        // The rest waits for the animations already playing, so a creature is not gone
+        // from the battlefield while its death is still on screen.
         // The caller has already copied this collection, so it is safe to hold on to.
         if (animator.defer("zones", () -> applyZoneUpdates(zonesToUpdate))) {
             return;
         }
         applyZoneUpdates(zonesToUpdate);
+    }
+
+    /** Create panels for anything new on a battlefield, without touching the rest. */
+    private void addArrivingPanels(final Iterable<PlayerZoneUpdate> zonesToUpdate) {
+        if (!animator.isEnabled()) {
+            return;
+        }
+        for (final PlayerZoneUpdate update : zonesToUpdate) {
+            if (!update.getZones().contains(ZoneType.Battlefield)) {
+                continue;
+            }
+            final VField vField = getFieldViewFor(update.getPlayer());
+            if (vField != null) {
+                try {
+                    vField.getTabletop().addArrivedPanels();
+                } catch (final RuntimeException e) {
+                    // The deferred pass will build them instead; losing the animation is
+                    // far better than losing the board.
+                    netLog.debug("Could not pre-build arriving panels", e);
+                }
+            }
+        }
     }
 
     private void applyZoneUpdates(final Iterable<PlayerZoneUpdate> zonesToUpdate) {
@@ -725,9 +754,14 @@ public final class CMatchUI
 
     @Override
     public void setSelectables(final Iterable<CardView> cards, final int min, final int max) {
-        // The player is about to pick things off the board, so the board has to be
-        // showing the truth. Anything still queued jumps to its end state now.
-        animator.skipAll();
+        // The queue is deliberately left alone here, and the prompt appears over a board
+        // that may still be catching up. Cutting the animations short was the safer thing
+        // to do - everything selectable is certainly on screen and certainly clickable -
+        // but it also meant every choice threw away the run of animations leading up to
+        // it, which is exactly the sequence that explains why the choice is being asked
+        // for. The game is blocked waiting for an answer, so the queue drains at its
+        // normal speed while the player reads; a target that has not arrived yet is a
+        // second away, or immediate on the skip hotkey.
         super.setSelectables(cards, min, max);
         // update zones on tabletop and floating zones - non-selectable cards may be rendered differently
         FThreads.invokeInEdtNowOrLater(() -> {

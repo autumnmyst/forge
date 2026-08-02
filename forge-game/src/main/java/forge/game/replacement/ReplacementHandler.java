@@ -35,6 +35,7 @@ import forge.game.GameEntityCounterTable;
 import forge.game.GameLogEntryType;
 import forge.game.IHasSVars;
 import forge.game.event.GameEventAddLog;
+import forge.game.event.GameEventReplacementApplied;
 import forge.game.ability.AbilityFactory;
 import forge.game.ability.AbilityKey;
 import forge.game.ability.AbilityUtils;
@@ -240,6 +241,7 @@ public class ReplacementHandler {
         String message = chosenRE.getDescription();
         if (!StringUtils.isEmpty(message)) {
             game.fireEvent(new GameEventAddLog(GameLogEntryType.EFFECT_REPLACED, message));
+            game.fireEvent(new GameEventReplacementApplied(chosenRE.getHostCard()));
         }
 
         // if its updated, try to call event again
@@ -540,6 +542,7 @@ public class ReplacementHandler {
             String message = re.getDescription();
             if (!StringUtils.isEmpty(message)) {
                 game.fireEvent(new GameEventAddLog(GameLogEntryType.EFFECT_REPLACED, message));
+                game.fireEvent(new GameEventReplacementApplied(re.getHostCard()));
             }
         }
     }

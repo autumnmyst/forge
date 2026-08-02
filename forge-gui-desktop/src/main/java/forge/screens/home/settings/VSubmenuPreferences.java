@@ -158,6 +158,7 @@ public enum VSubmenuPreferences implements IVSubmenu<CSubmenuPreferences> {
     private final FComboBoxPanel<String> cbpAutoDecisionMode = new FComboBoxPanel<>(localizer.getMessage("cbpAutoDecisionMode")+":");
     private final FComboBoxPanel<String> cbpStackGroupPermanents = new FComboBoxPanel<>(localizer.getMessage("cbpStackGroupPermanents")+":");
     private final FComboBoxPanel<Integer> cbpMaxStackDepth = new FComboBoxPanel<>(localizer.getMessage("cbpMaxStackDepth")+":");
+    private final FComboBoxPanel<String> cbpAnimationSpeed = new FComboBoxPanel<>(localizer.getMessage("cbpAnimationSpeed")+":");
     private final FComboBoxPanel<String> cbpCounterDisplayType = new FComboBoxPanel<>(localizer.getMessage("cbpCounterDisplayType")+":");
     private final FComboBoxPanel<String> cbpCounterDisplayLocation =new FComboBoxPanel<>(localizer.getMessage("cbpCounterDisplayLocation")+":");
     private final FComboBoxPanel<String> cbpGraveyardOrdering = new FComboBoxPanel<>(localizer.getMessage("cbpGraveyardOrdering")+":");
@@ -420,6 +421,9 @@ public enum VSubmenuPreferences implements IVSubmenu<CSubmenuPreferences> {
 
         pnlPrefs.add(cbEnableAnimations, titleConstraints);
         pnlPrefs.add(new NoteLabel(localizer.getMessage("nlEnableAnimations")), descriptionConstraints);
+
+        pnlPrefs.add(cbpAnimationSpeed, comboBoxConstraints);
+        pnlPrefs.add(new NoteLabel(localizer.getMessage("nlAnimationSpeed")), descriptionConstraints);
 
 
         pnlPrefs.add(getActionableHighlightColorPanel(), titleConstraints + ", h 26px!");
@@ -847,6 +851,10 @@ public enum VSubmenuPreferences implements IVSubmenu<CSubmenuPreferences> {
     }
 
     /** @return {@link javax.swing.JCheckBox} */
+    public FComboBoxPanel<String> getCbpAnimationSpeed() {
+        return cbpAnimationSpeed;
+    }
+
     public JCheckBox getCbEnableAnimations() {
         return cbEnableAnimations;
     }

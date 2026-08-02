@@ -34,6 +34,19 @@ public final class AnimationClock {
     private long lastTickNanos;
     /** Playback rate from preferences; below 1 slows everything down. */
     private volatile float userSpeed = 1f;
+    private Runnable onIdle;
+
+    /**
+     * Called on the EDT the moment nothing is left to play.
+     * <p>
+     * This is the point at which the display has caught up with the game, so anything
+     * the animator was holding back - a life total frozen at a value the game has since
+     * moved past - can safely be let go of. Without it a single missed release would
+     * leave the number wrong for the rest of the match.
+     */
+    public void setOnIdle(final Runnable onIdle) {
+        this.onIdle = onIdle;
+    }
 
     /**
      * Set the playback rate. Applied here rather than inside the queue so it reaches
@@ -68,9 +81,28 @@ public final class AnimationClock {
         }
     }
 
+    /**
+     * Where the playback rate comes from, sampled each time the clock wakes up.
+     * <p>
+     * Read at the start of a burst rather than every frame, and rather than only once when
+     * the match opens: the setting is on a screen the player can reach mid-match, and a
+     * speed control that does nothing until the next game would be no use.
+     */
+    public void setSpeedSource(final java.util.function.Supplier<Float> speedSource) {
+        this.speedSource = speedSource;
+    }
+
+    private java.util.function.Supplier<Float> speedSource;
+
     /** Begin ticking. Cheap to call repeatedly; the timer ignores a redundant start. */
     public void start() {
         if (!timer.isRunning()) {
+            if (speedSource != null) {
+                final Float speed = speedSource.get();
+                if (speed != null) {
+                    setUserSpeed(speed);
+                }
+            }
             lastTickNanos = System.nanoTime();
             timer.start();
         }
@@ -130,6 +162,9 @@ public final class AnimationClock {
             // Nothing left to show - go quiet rather than burn a repaint every 16ms.
             timer.stop();
             layer.repaint();
+            if (onIdle != null) {
+                onIdle.run();
+            }
         }
     }
 }

@@ -219,6 +219,157 @@ public class AnimationQueueTest {
         assertTrue(q.isIdle());
     }
 
+    /**
+     * The ordering that keeps a creature from fading out before the attacker reaches it.
+     * The board refresh is announced first and lands behind the reservation; the strikes
+     * are worked out afterwards and must still play before it.
+     */
+    @Test
+    public void splicedStepsPlayBeforeWhatWasQueuedAfterTheReservation() {
+        final List<String> log = new ArrayList<>();
+        final AnimationQueue q = new AnimationQueue();
+        final AnimationStep barrier = new AnimationStep("damage").reserved();
+        q.enqueue(barrier);
+        q.enqueue(new AnimationStep("board").after(() -> log.add("board")));
+
+        // Held while the slot is unfilled, so the refresh cannot overtake it.
+        q.tick(16);
+        assertTrue(log.isEmpty(), "the reservation must hold the refresh behind it");
+
+        q.enqueueBehind(barrier, List.of(step("strike1", log, 50), step("strike2", log, 50)));
+        barrier.seal();
+
+        for (int i = 0; i < 40 && !q.isIdle(); i++) {
+            q.tick(16);
+        }
+        assertEquals(log, List.of("strike1:before", "strike1:after",
+                "strike2:before", "strike2:after", "board"));
+    }
+
+    @Test
+    public void splicingBehindAStepAlreadyPlayedStillRuns() {
+        final List<String> log = new ArrayList<>();
+        final AnimationQueue q = new AnimationQueue();
+        final AnimationStep barrier = new AnimationStep("damage");
+        q.enqueue(barrier);
+        for (int i = 0; i < 5 && !q.isIdle(); i++) {
+            q.tick(16);
+        }
+
+        // Losing the ordering is acceptable; losing the step is not.
+        q.enqueueBehind(barrier, List.of(step("late", log, 50)));
+        for (int i = 0; i < 20 && !q.isIdle(); i++) {
+            q.tick(16);
+        }
+        assertEquals(log, List.of("late:before", "late:after"));
+    }
+
+    /**
+     * The guarantee that makes reserving a slot safe. A reservation nobody fills is
+     * played empty; whatever arrives afterwards must still apply, or a card entering
+     * play would be left invisible because its reveal was attached a moment too late.
+     */
+    @Test
+    public void aHookAttachedAfterTheStepPlayedStillRuns() {
+        final List<String> log = new ArrayList<>();
+        final AnimationQueue q = new AnimationQueue();
+        final AnimationStep abandoned = new AnimationStep("arrive").reserved();
+        q.enqueue(abandoned);
+
+        // Never sealed, so the queue eventually gives up and plays it empty.
+        for (int i = 0; i < 100 && !q.isIdle(); i++) {
+            q.tick(16);
+        }
+        assertTrue(q.isIdle(), "an unfilled reservation must not wedge the queue");
+
+        abandoned.after(() -> log.add("reveal"));
+        assertEquals(log, List.of("reveal"), "a late hook must apply immediately");
+    }
+
+    /**
+     * A reservation blocks everything behind it, including the commit-only steps that
+     * build the UI. Nothing filling a reservation may therefore depend on a step queued
+     * after it: an arrival that waited for the zone refresh to create its card panel was
+     * waiting on something waiting on itself, and every arrival stalled for the full
+     * timeout and lost its animation.
+     */
+    @Test
+    public void aReservationBlocksTheCommitStepsBehindIt() {
+        final List<String> log = new ArrayList<>();
+        final AnimationQueue q = new AnimationQueue();
+        final AnimationStep slot = new AnimationStep("arrive").reserved();
+        q.enqueue(slot);
+        q.enqueue(new AnimationStep("buildPanels").after(() -> log.add("panels")));
+
+        for (int i = 0; i < 10; i++) {
+            q.tick(16);
+        }
+        assertTrue(log.isEmpty(), "the refresh that builds panels cannot run first");
+
+        // So the slot has to be fillable from what is already known.
+        slot.add(dummy(50));
+        slot.seal();
+        for (int i = 0; i < 20 && !q.isIdle(); i++) {
+            q.tick(16);
+        }
+        assertEquals(log, List.of("panels"));
+    }
+
+    /**
+     * Steps play in the order they were queued, whatever else is going on. This is the
+     * property arrivals now depend on: an arrival is queued when the card enters and
+     * works out where to draw when it plays, rather than being built later and pushed in
+     * front of the trigger it caused.
+     */
+    @Test
+    public void queueOrderIsEventOrderEvenWhenStepsAreQueuedWhilePlaying() {
+        final List<String> log = new ArrayList<>();
+        final AnimationQueue q = new AnimationQueue();
+        q.enqueue(step("permanentArrives", log, 50));
+        q.enqueue(step("etbTrigger", log, 50));
+        // Queued mid-playback, the way a later event would arrive.
+        q.tick(16);
+        q.enqueue(step("tokenArrives", log, 50));
+
+        for (int i = 0; i < 60 && !q.isIdle(); i++) {
+            q.tick(16);
+        }
+        assertEquals(log, List.of("permanentArrives:before", "permanentArrives:after",
+                "etbTrigger:before", "etbTrigger:after",
+                "tokenArrives:before", "tokenArrives:after"));
+    }
+
+    @Test
+    public void delayedAnimationsStartLateButStillFinish() {
+        final List<String> log = new ArrayList<>();
+        final AnimationQueue q = new AnimationQueue();
+        q.enqueue(new AnimationStep("strike")
+                .add(dummy(200))
+                .add(CallbackAnim.at(100, () -> log.add("contact"))));
+
+        q.tick(16);
+        assertTrue(log.isEmpty(), "the callback must not fire as the step starts");
+
+        for (int i = 0; i < 40 && !q.isIdle(); i++) {
+            q.tick(16);
+        }
+        assertEquals(log, List.of("contact"));
+    }
+
+    /** A cut-short step must still apply what it was going to, delay or no delay. */
+    @Test
+    public void skippingRunsDelayedCallbacks() {
+        final List<String> log = new ArrayList<>();
+        final AnimationQueue q = new AnimationQueue();
+        q.enqueue(new AnimationStep("strike")
+                .add(dummy(5000))
+                .add(CallbackAnim.at(4000, () -> log.add("contact"))));
+
+        q.skipAll();
+        assertEquals(log, List.of("contact"));
+        assertTrue(q.isIdle());
+    }
+
     @Test
     public void pausedQueueHoldsWithoutDropping() {
         final List<String> log = new ArrayList<>();

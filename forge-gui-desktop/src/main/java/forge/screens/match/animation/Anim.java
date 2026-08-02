@@ -16,8 +16,31 @@ public abstract class Anim {
     private final long durationMs;
     private long elapsedMs;
     private long deltaMs;
+    private long delayRemainingMs;
     private boolean started;
     private boolean done;
+
+    /**
+     * Hold this animation back for {@code ms} before it begins.
+     * <p>
+     * Animations inside a step run concurrently, which is right for things that happen
+     * together but wrong for cause and effect: a creature was flinching as the beam that
+     * hit it set off, rather than when it arrived. A delay lets one step express a short
+     * sequence without splitting into several, which would put a queue boundary - and the
+     * board refresh that may be waiting at it - in the middle of a single event.
+     * <p>
+     * Nothing happens during the delay, not even {@link #onStart()}, so an animation that
+     * takes hold of its subject does not do so early.
+     */
+    public final Anim delayedBy(final long ms) {
+        this.delayRemainingMs = Math.max(0L, ms);
+        return this;
+    }
+
+    /** Total wall time this animation occupies, including any delay before it starts. */
+    public final long getTotalMs() {
+        return durationMs + delayRemainingMs;
+    }
 
     /**
      * Time advanced by the frame currently being applied, already scaled by the
@@ -52,6 +75,16 @@ public abstract class Anim {
             return true;
         }
         this.deltaMs = Math.max(1L, deltaMs);
+        if (delayRemainingMs > 0L) {
+            delayRemainingMs -= this.deltaMs;
+            if (delayRemainingMs > 0L) {
+                return false;
+            }
+            // Whatever the delay overran by belongs to the animation, or a long frame
+            // would be swallowed whole and short animations would start late.
+            this.deltaMs = Math.max(1L, -delayRemainingMs);
+            delayRemainingMs = 0L;
+        }
         if (!started) {
             started = true;
             onStart();
@@ -76,6 +109,9 @@ public abstract class Anim {
         if (done) {
             return;
         }
+        // A delay must not survive being cut short, or the animation would be considered
+        // finished without ever having applied anything.
+        delayRemainingMs = 0L;
         if (!started) {
             // Never rendered a frame; still run the lifecycle so onEnd can clean up.
             started = true;

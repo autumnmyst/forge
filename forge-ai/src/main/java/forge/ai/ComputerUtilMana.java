@@ -797,10 +797,13 @@ public class ComputerUtilMana {
 
         // The cost is still unpaid, so refund the mana and report
         if (!cost.isPaid()) {
-            manapool.refundMana(manaSpentToPay);
             if (test) {
+                // Quietly: nothing was really spent, so nothing is really being gained
+                // back. See the note on the refund below.
+                manapool.refundManaQuietly(manaSpentToPay);
                 resetPayment(paymentList);
             } else {
+                manapool.refundMana(manaSpentToPay);
                 System.out.println("ComputerUtilMana: payManaCost() cost was not paid for " + sa + " (" +  sa.getHostCard().getName() + "). Didn't find what to pay for " + toPay);
                 sa.setSkip(true);
             }
@@ -808,7 +811,12 @@ public class ComputerUtilMana {
         }
 
         if (test) {
-            manapool.refundMana(manaSpentToPay);
+            // Quietly. A test payment takes mana out of the pool and puts it straight
+            // back, leaving it exactly as it was - but announcing that as mana gained
+            // fires everything that listens for a gain. This runs whenever the auto-tap
+            // plan is worked out, so with floating mana every action set the pool
+            // flashing.
+            manapool.refundManaQuietly(manaSpentToPay);
             resetPayment(paymentList);
         }
 
