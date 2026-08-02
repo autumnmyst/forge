@@ -106,9 +106,9 @@ public final class MatchAnimator {
      * magnitude to scale by - these are fixed, and are the dial to turn if the sparks
      * want to be more or less prominent.
      */
-    private static final float MODIFY_SPARK = 3.0f;
+    private static final float MODIFY_SPARK = 4.5f;
     /** Slightly bigger again, since a replacement effect is the rarer, louder event. */
-    private static final float REPLACEMENT_SPARK = 3.4f;
+    private static final float REPLACEMENT_SPARK = 5.0f;
     /** How far an attacker travels toward what it hits, as a fraction of the gap. */
     private static final float LUNGE_REACH = 0.55f;
     private static final long LUNGE_MS = 420L;
@@ -1126,9 +1126,9 @@ public final class MatchAnimator {
                 continue;
             }
             step.add(m.replacement
-                    ? new ImpactAnim(at, REPLACEMENT_PALETTE, REPLACEMENT_SPARK, 420, 0f)
+                    ? new ImpactAnim(at, REPLACEMENT_PALETTE, REPLACEMENT_SPARK, 480, 0f)
                             .delayedBy(sparkAt)
-                    : new ImpactAnim(at, CardColors.of(m.card, canShow(m.card)), MODIFY_SPARK, 400, 0f)
+                    : new ImpactAnim(at, CardColors.of(m.card, canShow(m.card)), MODIFY_SPARK, 460, 0f)
                             .delayedBy(sparkAt));
             // The card was frozen when its change was announced; the spark is the moment
             // it is allowed to show what it became.
@@ -1790,9 +1790,16 @@ public final class MatchAnimator {
      * Pulse the floating-mana readout in the colour that was just added, wherever it came
      * from - a tapped land, a mana ability, or something resolving off the stack.
      * <p>
-     * Runs free of the queue rather than through it: mana usually appears while the
-     * player is mid-payment, and holding the board back for it would put a pause in the
-     * middle of tapping lands.
+     * Queued so that it keeps its place in the order, but as a step with no animations of
+     * its own, so it keeps costing the queue nothing. Both halves matter. Held back to be
+     * played in turn, a pulse would put a pause in the middle of paying a cost, once per
+     * land. Fired the moment the event arrived - which is what it used to do - it jumped
+     * whatever backlog the display was working through, so mana tapped on one turn could
+     * flash over a board still showing the turn before, and read as something the card on
+     * screen had just done.
+     * <p>
+     * The point is worked out when the step plays rather than now: the readout can be
+     * scrolled, resized or not yet on screen at the moment the game announces the mana.
      */
     private void recordManaAdded(final GameEventManaPool e) {
         if (e.mode() != EventValueChangeType.Added || e.player() == null || e.colors() == null) {
@@ -1800,15 +1807,44 @@ public final class MatchAnimator {
         }
         final List<MagicColor.Color> colors = new ArrayList<>(e.colors());
         final PlayerView player = e.player();
-        FThreads.invokeInEdtLater(() -> {
+        queue.enqueue(new AnimationStep("mana:" + player.getName()).before(() -> {
             for (final MagicColor.Color color : colors) {
                 final Point at = manaLabelCentre(player, color);
                 if (at != null) {
                     clock.addFree(new ImpactAnim(at, List.of(manaColor(color)), 1f, 380, 0f));
                 }
             }
-            clock.start();
-        });
+        }));
+        clock.start();
+    }
+
+    /** How long a permanent takes to turn between upright and tapped. */
+    private static final long TAP_MS = 190L;
+
+    /**
+     * Turn a permanent to its new tap state instead of snapping it sideways.
+     * <p>
+     * Free of the queue, and deliberately so: this is called from the board refresh, which
+     * is itself a queued step, so the turn already starts at the right point in the
+     * sequence. Handing it to the queue as well would make everything behind it wait for a
+     * card to finish rotating - and a cost paid with five lands would be five pauses.
+     *
+     * @return whether the turn was taken on. False means the caller should set the angle
+     *         itself, exactly as it did before.
+     */
+    public boolean animateTap(final CardPanel panel, final boolean tapped) {
+        if (!isEnabled() || panel == null || panel.getCardWidth() <= 0 || !panel.isShowing()) {
+            // No bounds yet means the panel has been built but never laid out, so this is a
+            // permanent that arrived already tapped rather than one being turned.
+            return false;
+        }
+        final double from = panel.getTappedAngle();
+        final double to = tapped ? CardPanel.TAPPED_ANGLE : 0;
+        if (Math.abs(to - from) < 0.01) {
+            return false;
+        }
+        clock.addFree(PanelAnim.tap(panel, from, to, TAP_MS));
+        return true;
     }
 
     /** Centre of a player's readout for one mana colour, in overlay coordinates. */
