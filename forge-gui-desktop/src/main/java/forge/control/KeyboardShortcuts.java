@@ -271,6 +271,15 @@ public class KeyboardShortcuts {
             }
         };
 
+        final Action actSkipAnimations = new AbstractAction() {
+            @Override
+            public void actionPerformed(final ActionEvent e) {
+                if (!Singletons.getControl().getCurrentScreen().isMatchScreen()) { return; }
+                if (matchUI == null) { return; }
+                matchUI.getAnimator().skipAll();
+            }
+        };
+
         final Localizer localizer = Localizer.getInstance();
         //========== Instantiate shortcut objects and add to list.
         list.add(new Shortcut(FPref.SHORTCUT_SHOWSTACK, localizer.getMessage("lblSHORTCUT_SHOWSTACK"), actShowStack, am, im));
@@ -293,6 +302,7 @@ public class KeyboardShortcuts {
         list.add(new Shortcut(FPref.SHORTCUT_SHOWHOTKEYS, localizer.getMessage("lblSHORTCUT_SHOWHOTKEYS"), actShowHotkeys, am, im));
         list.add(new Shortcut(FPref.SHORTCUT_PANELTABS, localizer.getMessage("lblSHORTCUT_PANELTABS"), actPanelTabs, am, im));
         list.add(new Shortcut(FPref.SHORTCUT_CARDOVERLAYS, localizer.getMessage("lblSHORTCUT_CARDOVERLAYS"), actCardOverlays, am, im));
+        list.add(new Shortcut(FPref.SHORTCUT_SKIP_ANIMATIONS, localizer.getMessage("lblSHORTCUT_SKIP_ANIMATIONS"), actSkipAnimations, am, im));
         cachedShortcuts = list;
         return list;
     } // End initMatchShortcuts()

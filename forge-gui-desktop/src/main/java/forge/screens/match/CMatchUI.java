@@ -54,6 +54,7 @@ import forge.game.card.Card;
 import forge.game.card.CardView;
 import forge.game.card.CardView.CardStateView;
 import forge.game.combat.CombatView;
+import forge.game.event.GameEvent;
 import forge.game.event.GameEventSpellAbilityCast;
 import forge.game.event.GameEventSpellRemovedFromStack;
 import forge.game.keyword.Keyword;
@@ -107,6 +108,7 @@ import forge.screens.match.controllers.CPrompt;
 import forge.screens.match.controllers.CStack;
 import forge.screens.match.menus.CMatchUIMenus;
 import forge.screens.match.views.VDrawOfferDialog;
+import forge.screens.match.animation.MatchAnimator;
 import forge.screens.match.views.VField;
 import forge.screens.match.views.VHand;
 import forge.toolbox.FButton;
@@ -156,6 +158,7 @@ public final class CMatchUI
     private final CMatchUIMenus menus = new CMatchUIMenus(this);
     private final Map<EDocID, IVDoc<? extends ICDoc>> myDocs;
     private final TargetingOverlay targetingOverlay = new TargetingOverlay(this);
+    private final MatchAnimator animator = new MatchAnimator(this);
 
     private FCollectionView<PlayerView> sortedPlayers;
     private final Map<String, String> avatarImages = new HashMap<>();
@@ -325,7 +328,7 @@ public final class CMatchUI
     public CDock getCDock() {
         return cDock;
     }
-    CPrompt getCPrompt() {
+    public CPrompt getCPrompt() {
         return cPrompt;
     }
     /** True if either prompt input button (OK/Cancel) is currently enabled. */
@@ -378,6 +381,9 @@ public final class CMatchUI
         final List<VField> fields = new ArrayList<>();
         Singletons.getView().getLpnDocument().add(targetingOverlay.getPanel(), FView.TARGETING_LAYER);
         targetingOverlay.getPanel().setSize(Singletons.getControl().getDisplaySize());
+        Singletons.getView().getLpnDocument().add(animator.getPanel(), FView.ANIMATION_LAYER);
+        animator.getPanel().setSize(Singletons.getControl().getDisplaySize());
+        animator.refreshPrefs();
 
         int i = 0;
         for (final PlayerView p : sortedPlayers) {
@@ -453,6 +459,16 @@ public final class CMatchUI
         }
         return null;
     }
+
+    public MatchAnimator getAnimator() {
+        return animator;
+    }
+
+    @Override
+    public void receiveRawGameEvent(final GameEvent event) {
+        animator.receiveGameEvent(event);
+    }
+
 
     @Override
     public void setCard(final CardView c) {
@@ -681,6 +697,9 @@ public final class CMatchUI
 
     @Override
     public void setSelectables(final Iterable<CardView> cards, final int min, final int max) {
+        // The player is about to pick things off the board, so the board has to be
+        // showing the truth. Anything still queued jumps to its end state now.
+        animator.skipAll();
         super.setSelectables(cards, min, max);
         // update zones on tabletop and floating zones - non-selectable cards may be rendered differently
         FThreads.invokeInEdtNowOrLater(() -> {
@@ -862,6 +881,7 @@ public final class CMatchUI
         final boolean actualEnable1 = macroReplaying ? false : enable1;
         final boolean actualEnable2 = macroReplaying ? true : enable2;
         final boolean actualFocus1 = macroReplaying ? false : focus1;
+
         btn1.setText(macroReplaying ? "" : label1);
         btn2.setText(macroReplaying ? Localizer.getInstance().getMessage("lblCancel") : label2);
 
@@ -1292,6 +1312,8 @@ public final class CMatchUI
     @Override
     public void afterGameEnd() {
         super.afterGameEnd();
+        animator.dispose();
+        Singletons.getView().getLpnDocument().remove(animator.getPanel());
         Singletons.getView().getLpnDocument().remove(targetingOverlay.getPanel());
         FThreads.invokeInEdtNowOrLater(() -> {
             Singletons.getView().getNavigationBar().closeTab(screen);

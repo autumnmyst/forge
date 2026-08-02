@@ -430,6 +430,11 @@ public enum FControl implements KeyEventDispatcher {
             children[0].setSize(display.getSize());
         }
 
+        children = display.getComponentsInLayer(FView.ANIMATION_LAYER);
+        if (children.length != 0) {
+            children[0].setSize(display.getSize());
+        }
+
         children = display.getComponentsInLayer(JLayeredPane.MODAL_LAYER);
         if (children.length != 0) {
             children[0].setSize(display.getSize());

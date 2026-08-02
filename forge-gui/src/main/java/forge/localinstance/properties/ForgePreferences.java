@@ -98,6 +98,9 @@ public class ForgePreferences extends AbstractPreferences<ForgePreferences.FPref
         UI_SHOW_ACTIONABLE_HIGHLIGHTS ("false"),
         UI_SHOW_AUTOTAP_PREVIEW ("false"),
         UI_ACTIONABLE_HIGHLIGHT_COLOR ("66CCFF"),
+        UI_ENABLE_ANIMATIONS ("true"),
+        /** Playback rate as a percentage; 100 is the designed pace, higher is faster. */
+        UI_ANIMATION_SPEED ("100"),
         UI_SHOW_LINKED_EXILE_CARDS ("true"),
         UI_LARGE_CARD_VIEWERS ("false"),
         UI_RANDOM_ART_IN_POOLS ("true"),
@@ -344,6 +347,9 @@ public class ForgePreferences extends AbstractPreferences<ForgePreferences.FPref
         SHORTCUT_SHOWHOTKEYS("72"),
         SHORTCUT_PANELTABS("17 84"),
         SHORTCUT_CARDOVERLAYS("17 79"),
+        // Shift+S rather than a bare key: Space and Enter activate the focused prompt
+        // button, and every plain letter that reads as "skip" is already taken.
+        SHORTCUT_SKIP_ANIMATIONS("16 83"),
 
         LAST_IMPORTED_CUBE_ID(""),
 

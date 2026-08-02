@@ -153,6 +153,9 @@ public class FControlGameEventHandler extends IGameEventVisitor.Base<Void> {
 
     @Subscribe
     public void receiveGameEvent(final GameEvent ev) {
+        // Hand the GUI the untouched event first. Everything below this line coalesces,
+        // so this is the only place an animation can see the individual steps.
+        matchController.receiveRawGameEvent(ev);
         ev.visit(this);
         SoundSystem.instance.receiveEvent(ev);
     }
