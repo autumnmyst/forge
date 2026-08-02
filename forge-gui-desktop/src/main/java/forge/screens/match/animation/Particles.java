@@ -103,30 +103,58 @@ public final class Particles {
     }
 
     /**
-     * Draw every live spark as a soft dot: an opaque core inside a wider halo, which
-     * reads as a glow without the cost of a real blur.
+     * How much of a spark's life it burns at full strength before it starts to fade.
+     * <p>
+     * The square curve this replaces was already below a quarter opacity by the halfway
+     * point, so a spark spent most of its life too faint to notice and an effect could go
+     * off without ever catching the eye.
+     */
+    private static final float HOLD = 0.5f;
+
+    /** How far the middle of a spark is pushed towards white. */
+    private static final float CORE_HEAT = 0.8f;
+
+    /** Where the hot centre gives way to the card's own colour. */
+    private static final float[] GLOW_STOPS = { 0f, 0.3f, 1f };
+
+    /**
+     * Draw every live spark as a soft dot: a near-white centre inside a coloured halo,
+     * which reads as a glow without the cost of a real blur.
+     * <p>
+     * The hot centre is what makes a spark carry. Drawn only in its card's own colour a
+     * spark is competing with a dark table and a busy board, and the darker colours - blue
+     * and black especially - lost that fight outright. Burning the middle out towards white
+     * gives every spark the same brightness to catch the eye with, and leaves the colour to
+     * the halo, where there is room for it to be read.
      */
     public void draw(final Graphics2D g) {
         for (int i = 0; i < count; i++) {
             final float t = Ease.clamp01(life[i] / maxLife[i]);
             final float radius = Math.max(0.6f, size[i] * (0.35f + 0.65f * t));
-            final Color base = new Color(argb[i], false);
-            final int alpha = Math.round(210 * t * t);
+            final int alpha = Math.round(235 * (t >= HOLD ? 1f : t / HOLD));
             if (alpha <= 2) {
                 continue;
             }
-            final Color core = new Color(base.getRed(), base.getGreen(), base.getBlue(), alpha);
+            final Color base = new Color(argb[i], false);
+            final Color core = whiten(base, CORE_HEAT, alpha);
+            final Color mid = new Color(base.getRed(), base.getGreen(), base.getBlue(), alpha);
             final Color edge = new Color(base.getRed(), base.getGreen(), base.getBlue(), 0);
-            final float halo = radius * 2.6f;
+            final float halo = radius * 3.0f;
             try {
                 g.setPaint(new RadialGradientPaint(new Point2D.Float(x[i], y[i]), halo,
-                        new float[] { 0f, 1f }, new Color[] { core, edge }));
+                        GLOW_STOPS, new Color[] { core, mid, edge }));
                 g.fillOval(Math.round(x[i] - halo), Math.round(y[i] - halo),
                         Math.round(halo * 2), Math.round(halo * 2));
             } catch (final IllegalArgumentException e) {
                 // RadialGradientPaint rejects a zero radius; such a spark is invisible anyway.
             }
         }
+    }
+
+    /** Blend towards white, keeping the supplied alpha. */
+    private static Color whiten(final Color c, final float amount, final int alpha) {
+        return new Color(Ease.lerp(c.getRed(), 255, amount), Ease.lerp(c.getGreen(), 255, amount),
+                Ease.lerp(c.getBlue(), 255, amount), alpha);
     }
 
     /** Colour for spark {@code i} of a run, cycling through a card's colours. */

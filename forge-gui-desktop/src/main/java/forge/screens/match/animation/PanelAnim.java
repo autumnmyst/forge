@@ -138,6 +138,56 @@ public final class PanelAnim {
         };
     }
 
+    /**
+     * Turn a permanent between upright and tapped instead of snapping it sideways.
+     * <p>
+     * The panel already has room for this. {@code CardPanel.setCardBounds} pads the panel
+     * by the distance from the rotation centre out to each corner of the card, and those
+     * are the extremes the corners reach part-way round rather than at either end - the
+     * top corners are furthest out at about 29 and 61 degrees, the bottom ones at 45. So
+     * the bounds that hold the finished pose hold every angle on the way to it, and the
+     * turn cannot be clipped. The angle was simply never asked for at anything but 0 or 90.
+     * <p>
+     * Deliberately without overshoot. Sprung past its resting angle a card being untapped
+     * would go briefly negative, and {@code CardPanel.paint} only rotates for a positive
+     * angle - so the last moment of every untap would be a snap upright and a flick back.
+     *
+     * @param from the angle to start from, so a card tapped again part-way through being
+     *             untapped turns back from where it had got to rather than jumping.
+     */
+    public static Anim tap(final CardPanel panel, final double from, final double to,
+            final long durationMs) {
+        return new Anim(durationMs) {
+            {
+                // Claimed at once rather than in onStart, which does not run until the
+                // first frame. A refresh arriving in that gap would find the angle
+                // unclaimed and assign it outright, and the turn would never be drawn.
+                if (panel != null) {
+                    panel.setTapAnimating(true);
+                }
+            }
+
+            @Override
+            protected void update(final float t) {
+                if (panel != null) {
+                    panel.setTappedAngle(from + (to - from) * Ease.inOut(t));
+                    panel.repaint();
+                }
+            }
+
+            @Override
+            protected void onEnd() {
+                if (panel != null) {
+                    // Released before the final angle is set, so the assignment is the one
+                    // thing a refresh arriving in the same breath will not be told to skip.
+                    panel.setTapAnimating(false);
+                    panel.setTappedAngle(to);
+                    panel.repaint();
+                }
+            }
+        };
+    }
+
     /** A short recoil away from a direction, for a creature taking a hit. */
     public static Anim flinch(final CardPanel panel, final Point away, final long durationMs) {
         return new Base(panel, durationMs) {

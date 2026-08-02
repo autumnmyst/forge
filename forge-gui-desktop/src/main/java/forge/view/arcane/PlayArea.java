@@ -1174,16 +1174,20 @@ public class PlayArea extends CardPanelContainer implements CardPanelMouseListen
         if (toPanel == null) { return false; }
 
         boolean needLayoutRefresh = false;
-        boolean tappedStateChanged = card.isTapped() != toPanel.isTapped();
+        final boolean tapped = card.isTapped();
+        boolean tappedStateChanged = tapped != toPanel.isTapped();
         if (tappedStateChanged) {
             splitCardIds.remove(card.getId());
         }
-        if (card.isTapped()) {
-            toPanel.setTapped(true);
-            toPanel.setTappedAngle(forge.view.arcane.CardPanel.TAPPED_ANGLE);
-        } else {
-            toPanel.setTapped(false);
-            toPanel.setTappedAngle(0);
+        // Turned rather than snapped, where there is an animator willing to do it. The
+        // panel's own flag is set at once either way, so everything that asks whether the
+        // card is tapped gets the right answer while the turn is still playing out - only
+        // the angle it is drawn at lags behind, and only for a moment.
+        final boolean turning = tappedStateChanged
+                && getMatchUI().getAnimator().animateTap(toPanel, tapped);
+        toPanel.setTapped(tapped);
+        if (!turning && !toPanel.isTapAnimating()) {
+            toPanel.setTappedAngle(tapped ? forge.view.arcane.CardPanel.TAPPED_ANGLE : 0);
         }
         toPanel.getAttachedPanels().clear();
 

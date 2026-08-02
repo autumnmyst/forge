@@ -1363,6 +1363,24 @@ public class CardPanel extends SkinnedPanel implements CardContainer, IDisposabl
         tappedAngle = tappedAngle0;
     }
 
+    private boolean tapAnimating;
+
+    /**
+     * Whether something is currently driving {@link #setTappedAngle} frame by frame.
+     * <p>
+     * A layout refresh assigns the angle outright from the card's tap state, and has to go
+     * on doing so - it is the only thing that sets it when animations are off, and it runs
+     * whenever anything on the battlefield changes rather than only when this card turned.
+     * Landing on top of a turn in progress, it would cut every one of them short.
+     */
+    public final boolean isTapAnimating() {
+        return tapAnimating;
+    }
+
+    public final void setTapAnimating(final boolean tapAnimating0) {
+        tapAnimating = tapAnimating0;
+    }
+
     private static boolean isPreferenceEnabled(final FPref preferenceName) {
         return FModel.getPreferences().getPrefBoolean(preferenceName);
     }
