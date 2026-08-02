@@ -72,6 +72,13 @@ public class VDock implements IVDoc<CDock> {
     private static final Color PRESSED_BG = new Color(24, 24, 24);
     private static final Color EDGE_LIGHT = new Color(255, 255, 255, 150);
     private static final Color EDGE_DARK = new Color(0, 0, 0, 170);
+    /**
+     * Worn by a latched toggle: a faint grey lift rather than a colour, since this sits
+     * next to the board and should be findable when looked for without ever competing
+     * with it for attention.
+     */
+    public static final Color ACCENT_ON = new Color(176, 176, 176, 140);
+    private static final int ACCENT_WASH_ALPHA = 42;
     private static final Dimension BUTTON_SIZE = new Dimension(30, 30);
 
     final Localizer localizer = Localizer.getInstance();
@@ -428,6 +435,8 @@ public class VDock implements IVDoc<CDock> {
         private Consumer<MouseEvent> dragOverAction;
         private boolean dragging;
         private boolean armedPress;
+        private Color accent;
+        private Color accentWash;
         private DisplayState displayState = DisplayState.RAISED;
         // Translucent overlay on the root layered pane that follows the cursor
         // while dragging; the slot itself renders empty (dotted outline).
@@ -530,6 +539,24 @@ public class VDock implements IVDoc<CDock> {
             setDisplayState(a ? DisplayState.PRESSED : DisplayState.RAISED);
         }
 
+        /**
+         * Colour this button wears while its toggle is on, or null for the plain pressed
+         * look.
+         * <p>
+         * Only for the buttons that latch. The pressed look is a bevel a few pixels deep
+         * on a 30px tile, which says "on" only if you already know to look for it - and
+         * whether the game is about to play itself is worth being able to read across the
+         * room.
+         */
+        public void setAccent(final Color accent0) {
+            if (this.accent != accent0) {
+                this.accent = accent0;
+                this.accentWash = accent0 == null ? null : new Color(accent0.getRed(),
+                        accent0.getGreen(), accent0.getBlue(), ACCENT_WASH_ALPHA);
+                repaintSelf();
+            }
+        }
+
         public void setDisplayState(final DisplayState displayState0) {
             if (this.displayState == displayState0) {
                 return;
@@ -627,17 +654,29 @@ public class VDock implements IVDoc<CDock> {
          */
         private void paintTileAndGlyph(final Graphics g, final int width, final int height) {
             final boolean enabled = isEnabled();
-            final boolean pressed = enabled && (this.armedPress || this.displayState == DisplayState.PRESSED);
+            final boolean latched = enabled && this.displayState == DisplayState.PRESSED;
+            final boolean pressed = enabled && (this.armedPress || latched);
             final boolean raised = enabled && !pressed && this.displayState == DisplayState.RAISED;
+            // Tied to the latch rather than to the press, since a button being clicked is
+            // not a button that is on - holding the mouse down on it must not preview the
+            // colour of the state it is about to leave.
+            final boolean accented = latched && this.accent != null;
 
-            if (pressed) {
+            if (accented) {
+                g.setColor(this.accentWash);
+            } else if (pressed) {
                 g.setColor(PRESSED_BG);
             } else {
                 g.setColor(TRANSPARENT);
             }
             g.fillRect(0, 0, width, height);
 
-            if (raised || pressed) {
+            if (accented) {
+                // A ring rather than the bevel: even this faint, an even outline reads as
+                // a state, while a bevel only ever reads as a lighting change.
+                g.setColor(this.accent);
+                g.drawRect(0, 0, width - 1, height - 1);
+            } else if (raised || pressed) {
                 g.setColor(pressed ? EDGE_DARK : EDGE_LIGHT);
                 g.drawLine(0, 0, width - 1, 0);
                 g.drawLine(0, 0, 0, height - 1);

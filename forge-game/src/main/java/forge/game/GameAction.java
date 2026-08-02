@@ -2236,6 +2236,9 @@ public class GameAction {
     public void reveal(CardCollectionView cards, ZoneType zt, Player cardOwner, boolean dontRevealToOwner, String messagePrefix, boolean msgAddSuffix) {
         for (Player p : game.getPlayers()) {
             if (dontRevealToOwner && cardOwner == p) {
+                // Their own card, so they are not shown it - but it still belongs in their
+                // log, next to everyone else's copy of the same line.
+                p.getController().logReveal(cards, zt, cardOwner);
                 continue;
             }
             p.getController().reveal(cards, zt, cardOwner, messagePrefix, msgAddSuffix);
@@ -2271,7 +2274,12 @@ public class GameAction {
             value = TextUtil.fastReplace(value, "NICKNAME", Lang.getInstance().getNickName(name));
         }
         for (Player p : game.getPlayers()) {
-            if (playerExcept == p) continue;
+            if (playerExcept == p) {
+                // The one who made the choice, so there is nothing to tell them - but their
+                // log should still say what they did.
+                p.getController().logValue(saSource, relatedTarget, value);
+                continue;
+            }
             p.getController().notifyOfValue(saSource, relatedTarget, value);
         }
     }
