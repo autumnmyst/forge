@@ -1264,10 +1264,14 @@ public class GameAction {
         }
         // TODO filter out old copies from zone change
 
+        // Unfrozen before the event, not after. Everything above sets view properties while
+        // the tracker is frozen, so they sit in its delayed queue until this call publishes
+        // them - and announcing first meant every listener read the card as it was before
+        // the change it was being told about. checkStateEffects already does it this way.
+        game.getTracker().unfreeze();
         if (runEvents && !affectedCards.isEmpty()) {
             game.fireEvent(new GameEventCardStatsChanged(affectedCards));
         }
-        game.getTracker().unfreeze();
     }
 
     private StaticAbility findStaticAbilityToApply(StaticAbilityLayer layer, List<StaticAbility> staticsForLayer, CardCollectionView preList, Map<StaticAbility, CardCollectionView> affectedPerAbility,
