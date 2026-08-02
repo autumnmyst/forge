@@ -18,6 +18,7 @@ import java.util.concurrent.Executors;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
+import javax.swing.Timer;
 
 import forge.card.MagicColor;
 import forge.game.GameEntityView;
@@ -52,6 +53,7 @@ import forge.screens.match.views.VField;
 import forge.screens.match.views.VHand;
 import forge.util.collect.FCollectionView;
 import forge.view.arcane.CardPanel;
+import forge.view.arcane.HandArea;
 
 /**
  * Owns the animation system for one match and translates game events into motion.
@@ -172,11 +174,6 @@ public final class MatchAnimator {
         clock.setSpeedSource(() -> userSpeed());
         clock.setOnIdle(() -> {
             releaseAllLife();
-            // Sparks still waiting for an arrival that never came. Dropping them is right:
-            // the display has caught up, so there is nothing left to explain.
-            synchronized (this) {
-                sparksAwaitingArrival.clear();
-            }
             thawAllCards();
             showAllStackItems();
             // The display has caught up, so damage no longer owns anything's appearance
@@ -226,13 +223,13 @@ public final class MatchAnimator {
 
     public void dispose() {
         clock.stop();
+        modFlush.stop();
         soundThread.shutdownNow();
         queue.skipAll();
         departing.clear();
         arriving.clear();
         arrivedFrom.clear();
         pendingArrivals.clear();
-        sparksAwaitingArrival.clear();
         awaitingOrigin.clear();
         pendingDamage.clear();
         fingerprints.clear();
@@ -413,25 +410,20 @@ public final class MatchAnimator {
                         pendingArrivals.remove(id, arrival);
                     }
                 });
-                // Anything that changed this card before it was announced as entering has
-                // been waiting for exactly this step.
-                claimHeldSparks(id, arrival);
                 queue.enqueue(arrival);
                 clock.start();
                 FThreads.invokeInEdtLater(() -> claimAwaitingPanel(card, from));
                 if (from == ZoneType.Hand) {
-                    // A land: its origin is the card still sitting in hand, so the hand
-                    // panel has to be measured before the zone refresh takes it away.
+                    // A land. Recorded so that its hand panel going is understood as the
+                    // start of an arrival rather than as a death, whichever of the arrival
+                    // step and the deferred refresh gets there first.
                     departing.put(card.getId(), ZoneType.Battlefield);
-                    // And taken out of the hand now rather than by the deferred refresh,
-                    // which waits behind every animation this play set off. A land with a
-                    // trigger could sit in hand for the whole of its own arrival, so the
-                    // card was in two places at once - a basic land only looked right
-                    // because nothing was queued to hold the refresh up.
-                    FThreads.invokeInEdtLater(() -> removeFromHand(card));
                 }
             } else if (from == ZoneType.Battlefield) {
                 departing.put(card.getId(), to);
+                if (to != ZoneType.Battlefield && to != ZoneType.Stack) {
+                    departures++;
+                }
             }
         }
     }
@@ -792,24 +784,31 @@ public final class MatchAnimator {
     private Resolution modScope;
     /** A permanent was joining the board as this burst began - a static taking hold. */
     private boolean modEntering;
-    /** A permanent was leaving it - a static letting go. */
-    private boolean modLeaving;
+    /** Where {@link #departures} stood when this burst began. */
+    private int modDepartures;
 
     /**
-     * Whether anything is on its way off the battlefield right now.
+     * How many permanents have left a battlefield, counted rather than flagged so a burst
+     * can tell whether one left while it was gathering.
      * <p>
-     * Not simply whether {@code departing} has entries: a land being played is recorded
-     * there too, so that its origin can be measured in hand before the refresh takes it
-     * away, and that is an arrival rather than a departure.
+     * A departure is what says a continuous effect is letting go rather than taking hold,
+     * but only a departure the burst has not already been through. A flag could not draw
+     * that line, and everything it left standing was read as an effect wearing off: a Food
+     * sacrificed to pay for an ability is a departure like any other, so Camellia's own
+     * counters landing on the whole team a moment later never swept the board.
+     * <p>
+     * Comparing works because a permanent's zone change is announced at the end of its
+     * move, after the static abilities it was holding up have been recomputed and
+     * reported. A lord dying therefore announces the team shrinking first and itself
+     * second, so a departure that explains a burst always lands after that burst opened -
+     * and one that landed before it belongs to something already shown.
+     * <p>
+     * Deliberately not read off {@code departing}. That map is display bookkeeping - an
+     * entry lives there until the deferred refresh takes the panel away - so asking it
+     * answered "did anything leave at some point in the backlog we have not drawn yet",
+     * not "is something leaving now".
      */
-    private boolean anyLeavingBattlefield() {
-        for (final ZoneType to : departing.values()) {
-            if (to != ZoneType.Battlefield && to != ZoneType.Stack) {
-                return true;
-            }
-        }
-        return false;
-    }
+    private volatile int departures;
 
     /**
      * The characteristics each card was last seen with.
@@ -902,15 +901,17 @@ public final class MatchAnimator {
         // counters and icons straight off the live card. Every card in the burst, not
         // just the one that opened it.
         freezeCard(card);
-        // Read before taking the other lock, and while they are still true: whether a
-        // permanent is joining the board or leaving it is what says whether a static
-        // ability is taking hold or letting go.
+        // Whether a permanent is joining the board or leaving it is what says whether a
+        // static ability is taking hold or letting go. Joining is read here, while it is
+        // still true - the arrival is claimed as soon as the panel exists, which can
+        // happen before this burst is shown. Leaving cannot be read here at all, since a
+        // departure is announced after the changes it causes, so all the burst records is
+        // where the count stood; the question is put again at flush time.
         final boolean entering;
-        final boolean leaving;
         synchronized (this) {
             entering = !arriving.isEmpty();
-            leaving = anyLeavingBattlefield();
         }
+        final int departuresSoFar = departures;
         final boolean first;
         synchronized (pendingMods) {
             final ModRecord m = pendingMods.computeIfAbsent(card.getId(), k -> new ModRecord(card));
@@ -924,13 +925,48 @@ public final class MatchAnimator {
                 modSource = modScope != null ? modScope.source : null;
                 modFromStack = modSource != null;
                 modEntering = entering;
-                modLeaving = leaving;
+                modDepartures = departuresSoFar;
             }
         }
-        if (first) {
-            FThreads.invokeInEdtLater(this::flushMods);
-        }
+        // Restarted by every change, so the burst ends when the changes stop rather than a
+        // fixed time after the first one. Deliberately not holding a place in the queue
+        // while it gathers: a static ability takes hold while the permanent carrying it is
+        // being put onto the battlefield, which is announced before the zone change is, so
+        // a slot taken here is taken ahead of that permanent's own arrival and the board
+        // flashes before the card that did it has appeared.
+        scheduleModFlush();
     }
+
+    /**
+     * Wait a moment more before showing the changes gathered so far.
+     * <p>
+     * Safe to call from either thread; {@link Timer} is thread safe and fires on the EDT.
+     */
+    private void scheduleModFlush() {
+        modFlush.restart();
+    }
+
+    private final Timer modFlush = createModFlushTimer();
+
+    private Timer createModFlushTimer() {
+        final Timer t = new Timer(MOD_COALESCE_MS, e -> flushMods());
+        t.setRepeats(false);
+        return t;
+    }
+
+    /**
+     * How long to let a burst of changes gather before showing it.
+     * <p>
+     * An effect that changes several permanents does not always announce them together.
+     * A pump fires an event per creature back to back, which never splits, but a counter
+     * fires two events per card and runs that card's triggers before moving on - enough
+     * of a gap for the flush to be serviced in the middle of the effect. The board then
+     * saw one creature change, and then the rest as a separate event, which is neither
+     * the right count for a sweep nor the right beat for the sparks.
+     * <p>
+     * Two frames is longer than those gaps and shorter than anything a player can see.
+     */
+    private static final int MOD_COALESCE_MS = 32;
 
     /**
      * Cards damage has claimed the visual for, until the display catches up.
@@ -961,6 +997,15 @@ public final class MatchAnimator {
         final boolean entering;
         final boolean leaving;
         synchronized (pendingMods) {
+            if (modScope != null && resolving == modScope) {
+                // The effect that opened this burst is still running, and it announces what
+                // it changed one permanent at a time - a counter fires two events per card
+                // and runs that card's triggers before moving on, which is wide enough for
+                // a fixed wait to expire in the middle of the effect. What ends the burst
+                // is the effect finishing, not a stopwatch, so wait again.
+                scheduleModFlush();
+                return;
+            }
             modFlushQueued = false;
             if (pendingMods.isEmpty()) {
                 return;
@@ -970,12 +1015,18 @@ public final class MatchAnimator {
             fromStack = modFromStack;
             scope = modScope;
             entering = modEntering;
-            leaving = modLeaving;
+            // Only something that left while this burst was gathering. A permanent's zone
+            // change is announced at the end of the move, after the static abilities it was
+            // holding up have already been recomputed and reported - so when a lord dies,
+            // the team shrinking is announced before the lord is known to have gone, and
+            // asking now puts the two back in the right order. Anything that had already
+            // gone when the burst opened is not what this burst is about: a sacrifice made
+            // to pay a cost is not the ability it paid for wearing off.
+            leaving = departures != modDepartures;
             pendingMods.clear();
             modSource = null;
             modScope = null;
             modEntering = false;
-            modLeaving = false;
         }
 
         // Whether this was an effect being applied or one wearing off. Only an
@@ -1007,22 +1058,29 @@ public final class MatchAnimator {
         final AnimationStep step = new AnimationStep("modify");
         final Map<PlayerView, Integer> perController = new LinkedHashMap<>();
         final List<ModRecord> visible = new ArrayList<>(mods.size());
-        final List<ModRecord> notLandedYet = new ArrayList<>(0);
         for (final ModRecord m : mods) {
-            // A card can be changed before it is on screen - a planeswalker is given its
-            // loyalty on the way in, and anything entering with counters or under a lord
-            // is in the same position. Sparking now would flash at an empty slot and only
-            // then animate the card turning up, so this waits for it to land. It still
-            // counts towards the sweep below: the effect did reach that board.
-            //
-            // Asked before measuring, not after. A card that has not arrived has nowhere
-            // to be measured to, so testing the position first threw these away as
-            // unplaceable and the wait never happened.
-            final boolean waiting = isAwaitingArrival(m.card);
-            if (!waiting && centreOf(m.card) == null) {
+            final CardPanel panel = findPanel(m.card);
+            if (panel == null || centreOf(panel) == null) {
                 continue;
             }
-            (waiting ? notLandedYet : visible).add(m);
+            // Nothing to spark on a card that is not on screen yet. A planeswalker is
+            // given its loyalty on the way in, and anything entering with counters or
+            // under a lord is in the same position: the card arrives with it already
+            // there, so there is no change for a spark to mark - not before it lands and
+            // not after either. It still counts towards the sweep below, because the
+            // effect did reach that board, and it is thawed in case the freeze caught it.
+            //
+            // Asked of the arrival rather than of the panel's opacity. A hidden panel is
+            // not only a card that has yet to appear: one being carried to a new slot is
+            // hidden too, while an overlay copy makes the journey. So every change that
+            // landed as the board re-laid itself out was thrown away - which is most of
+            // them, since a permanent leaving or joining is exactly what shuffles the
+            // board and exactly what makes a static ability let go or take hold.
+            if (isAwaitingArrival(m.card)) {
+                thawCard(m.card);
+            } else {
+                visible.add(m);
+            }
             // A replacement effect firing is about the card it is printed on, not about
             // whatever effect happened to be resolving, so it is never counted towards a
             // board sweep and never takes the effect's colours.
@@ -1077,43 +1135,46 @@ public final class MatchAnimator {
             step.add(CallbackAnim.at(sparkAt, () -> thawCard(m.card)));
         }
 
-        for (final ModRecord m : notLandedYet) {
-            sparkOnceArrived(m);
-        }
-
         if (!step.isEmpty()) {
             queue.enqueue(step);
             clock.start();
         }
     }
 
-    /** Whether a card is still on its way in and has not been shown on the board yet. */
+    /** Whether a card is on its way onto a battlefield and has not been shown there yet. */
     private boolean isAwaitingArrival(final CardView card) {
         if (card == null) {
             return false;
         }
         synchronized (this) {
-            if (pendingArrivals.containsKey(card.getId())) {
-                return true;
-            }
+            return pendingArrivals.containsKey(card.getId());
         }
-        final CardPanel panel = findPanel(card);
-        return panel != null && panel.getRenderAlpha() <= 0f;
     }
 
     /**
-     * Take a card out of the hand it has just been played from.
+     * Take a card out of the hand it has just been played from, and close the hand up.
      * <p>
      * Goes through the container's own removal so the card is still seen leaving - that
      * hook is what copies the panel for its departure - and the deferred refresh that
      * follows simply finds it already gone.
+     * <p>
+     * The relayout is the point of doing this at all. Removing a panel invalidates the
+     * hand without revalidating it, so the cards that are left keep the bounds they had
+     * and a hole sits where the played card was until the deferred refresh rebuilds the
+     * row. Validating here is the same sequence that refresh ends with.
      */
     private void removeFromHand(final CardView card) {
         for (final VHand h : matchUI.getHandViews()) {
             try {
-                final CardPanel p = h.getHandArea().getCardPanel(card.getId());
+                final HandArea area = h.getHandArea();
+                final CardPanel p = area.getCardPanel(card.getId());
                 if (p != null) {
-                    h.getHandArea().removeCardPanel(p);
+                    area.removeCardPanel(p);
+                    area.invalidate();
+                    if (area.getParent() != null) {
+                        area.getParent().validate();
+                    }
+                    area.repaint();
                     return;
                 }
             } catch (final RuntimeException ignored) {
@@ -1147,67 +1208,6 @@ public final class MatchAnimator {
             }
         }
         return findPanel(card);
-    }
-
-    /**
-     * Show a change to a card that has not arrived yet, once it has.
-     * <p>
-     * Hung off the arrival step rather than queued behind it, because which of the two the
-     * game announced first is not fixed - counters go on a planeswalker before it enters,
-     * but the zone change can still reach the queue first. Attaching to a step that has
-     * already played simply runs now, which is the right answer in that case: the card is
-     * on the board.
-     */
-    private void sparkOnceArrived(final ModRecord m) {
-        final AnimationStep arrival;
-        synchronized (this) {
-            arrival = pendingArrivals.get(m.card.getId());
-            if (arrival == null) {
-                // The change was announced before the card's zone change was. A
-                // planeswalker's loyalty is put on as it enters, and the panel can already
-                // exist and be waiting - so there is something to spark and nothing yet to
-                // wait for. Sparking now was the whole bug: it fired before the arrival
-                // step had even been created, let alone played. Held until the arrival
-                // turns up and claimed by it.
-                sparksAwaitingArrival.computeIfAbsent(m.card.getId(), k -> new ArrayList<>(1)).add(m);
-                return;
-            }
-        }
-        arrival.then(sparkFor(m));
-    }
-
-    /**
-     * Sparks recorded for a card whose arrival has not been announced yet, keyed by card.
-     * Claimed by the arrival when it arrives, and dropped if it never does.
-     */
-    private final Map<Integer, List<ModRecord>> sparksAwaitingArrival = new HashMap<>();
-
-    /** Hand any sparks held for this card to the arrival that will show it. */
-    private void claimHeldSparks(final int cardId, final AnimationStep arrival) {
-        final List<ModRecord> held = sparksAwaitingArrival.remove(cardId);
-        if (held == null) {
-            return;
-        }
-        for (final ModRecord m : held) {
-            arrival.then(sparkFor(m));
-        }
-    }
-
-    private Runnable sparkFor(final ModRecord m) {
-        return () -> {
-            final Point at = centreOf(m.card);
-            if (at == null) {
-                thawCard(m.card);
-                return;
-            }
-            final AnimationStep s = new AnimationStep("modify:landed");
-            s.add(m.replacement
-                    ? new ImpactAnim(at, REPLACEMENT_PALETTE, REPLACEMENT_SPARK, 420, 0f)
-                    : new ImpactAnim(at, CardColors.of(m.card, canShow(m.card)), MODIFY_SPARK, 400, 0f));
-            s.then(() -> thawCard(m.card));
-            queue.enqueue(s);
-            clock.start();
-        };
     }
 
     // ------------------------------------------------------------------ player changes
@@ -1762,6 +1762,17 @@ public final class MatchAnimator {
             clock.addFree(PanelAnim.fadeIn(panel, 320));
         };
         final AnimationStep step = new AnimationStep("arrive:" + card.getName()).after(reveal);
+        if (from == ZoneType.Hand) {
+            // The card leaves the hand exactly as its trail sets off, rather than when the
+            // game moved it. Removing it any earlier put it in neither place for the length
+            // of the arrival, and the deferred zone refresh - which is what would otherwise
+            // close the hand up - waits behind every animation the play set off.
+            //
+            // Nothing here needs the hand panel: a card entering from a hand is drawn out
+            // of its owner's avatar, since the hand itself is not visible from both sides
+            // of the table. See originFor.
+            step.before(() -> removeFromHand(card));
+        }
         step.add(new BeamAnim(
                 () -> originFor(from, card),
                 () -> centreOf(panelForArrival(card)),
