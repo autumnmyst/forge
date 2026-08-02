@@ -27,6 +27,7 @@ import forge.gui.interfaces.IButton;
 import forge.gui.interfaces.IProgressBar;
 import forge.gui.interfaces.ITextField;
 import forge.localinstance.properties.ForgeConstants;
+import forge.util.BuildInfo;
 import forge.util.FileUtil;
 import forge.util.HttpUtil;
 import forge.util.TextUtil;
@@ -44,6 +45,19 @@ import java.util.regex.Pattern;
 @SuppressWarnings("serial")
 public abstract class GuiDownloadService implements Runnable {
     public static final Proxy.Type[] TYPES = Proxy.Type.values();
+
+    /**
+     * Separator used to pack multiple candidate URLs into a single map value.
+     * The downloader tries each candidate in order until one succeeds, mirroring
+     * the on-demand ImageFetcher's fallback behaviour. Tabs never appear in URLs,
+     * so single-URL callers are unaffected.
+     */
+    public static final String URL_SEPARATOR = "\t";
+
+    /** {@link HttpURLConnection} has no constant for 429. */
+    protected static final int HTTP_TOO_MANY_REQUESTS = 429;
+    /** Scryfall limits access for 30 seconds after a 429; wait it out, plus a margin. */
+    protected static final long RATE_LIMIT_BACKOFF_MS = 31000L;
 
     //Components passed from GUI component displaying download
     private ITextField txtAddress;
@@ -223,133 +237,163 @@ public abstract class GuiDownloadService implements Runnable {
 
         Proxy p = getProxy();
 
-        boolean cardSkipped;
-        int bufferLength;
         int count = 0;
         int totalCount = files.size();
         byte[] buffer = new byte[1024];
 
         for (Entry<String, String> kv : files.entrySet()) {
-            boolean isJPG = true;
-            boolean isLogged = false;
-            boolean fullborder = false;
             if (cancel) {//stop prevent sleep
                 GuiBase.getInterface().preventSystemSleep(false);
                 break; }
 
             count++;
-            cardSkipped = true; //assume skipped unless saved successfully
-            String url = kv.getValue();
 
             String decodedKey = decodeURL(kv.getKey());
-            File fileDest = new File(decodedKey);
-            final String filePath = fileDest.getPath();
+            final String filePath = new File(decodedKey).getPath();
             final String subLastIndex = filePath.contains("pics") ? "\\pics\\" : filePath.contains("skins") ? "\\"+FileUtil.getParent(filePath)+"\\" : "\\db\\";
 
             System.out.println(count + "/" + totalCount + " - .." + filePath.substring(filePath.lastIndexOf(subLastIndex)+1));
 
-            FileOutputStream fos = null;
-            try {
-                final File base = fileDest.getParentFile();
-                if (FileUtil.ensureDirectoryExists(base)) { //ensure destination directory exists
-                    URL imageUrl = new URL(url);
-                    HttpURLConnection conn = (HttpURLConnection) imageUrl.openConnection(p);
-                    // don't allow redirections here -- they indicate 'file not found' on the server
-                    // only allow redirections to consume Scryfall API
-                    if(url.contains("api.scryfall.com")) {
-                        conn.setInstanceFollowRedirects(true);
-                        TimeUnit.MILLISECONDS.sleep(100);
-                    } else {
-                        conn.setInstanceFollowRedirects(false);
-                    }
-                    conn.connect();
-
-                    //if .full file is not found try fullborder
-                    if ((conn.getResponseCode() == HttpURLConnection.HTTP_NOT_FOUND) && (url.contains(".full.jpg")))
-                    {
-                        fullborder = true;
-                        conn.disconnect();
-                        url = TextUtil.fastReplace(url, ".full.jpg", ".fullborder.jpg");
-                        imageUrl = new URL(url);
-                        conn = (HttpURLConnection) imageUrl.openConnection(p);
-                        conn.setInstanceFollowRedirects(false);
-                        conn.connect();
-                    }
-
-                    // if file is not found and this is a JPG, give PNG a shot...
-                    if ((conn.getResponseCode() == HttpURLConnection.HTTP_NOT_FOUND) && (url.endsWith(".jpg"))) {
-                        fullborder = false;
-                        isJPG = false;
-                        conn.disconnect();
-                        if(url.contains("/images/")){
-                            isLogged = true;
-                            System.out.println("File not found: .." + url.substring(url.lastIndexOf("/images/")+1));
-                        }
-                        url = url.substring(0,url.length() - 4) + ".png";
-                        imageUrl = new URL(TextUtil.fastReplace(url, ".fullborder.", ".full."));
-                        conn = (HttpURLConnection) imageUrl.openConnection(p);
-                        conn.setInstanceFollowRedirects(false);
-                        conn.connect();
-                    }
-
-                    if (fullborder) {
-                        fileDest = new File(TextUtil.fastReplace(decodedKey, ".full.jpg", ".fullborder.jpg"));
-                    }
-
-                    switch (conn.getResponseCode()) {
-                    case HttpURLConnection.HTTP_OK:
-                        fos = new FileOutputStream(fileDest);
-                        InputStream inputStream = conn.getInputStream();
-                        while ((bufferLength = inputStream.read(buffer)) > 0) {
-                            fos.write(buffer, 0, bufferLength);
-                        }
-                        cardSkipped = false;
-                        break;
-                    case HttpURLConnection.HTTP_NOT_FOUND:
-                        conn.disconnect();
-                        if(url.contains("/images/") && !isJPG && !isLogged)
-                            System.out.println("File not found: .." + url.substring(url.lastIndexOf("/images/")+1));
-                        break;
-                    default:
-                        conn.disconnect();
-                        System.out.println("  Connection failed for url: " + url);
-                        break;
-                    }
-                } else {
-                    System.out.println("  Can't create folder: " + base.getAbsolutePath());
+            // Try each candidate URL in order until one succeeds. Most callers
+            // supply a single URL; card images add a cardforge fallback so alt
+            // arts whose Scryfall lookup 404s still resolve (as on hover).
+            boolean saved = false;
+            for (String url : kv.getValue().split(URL_SEPARATOR)) {
+                if (url.isEmpty()) {
+                    continue;
                 }
-            }
-            catch (final ConnectException ce) {
-                System.out.println("  Connection refused for url: " + url);
-            }
-            catch (final MalformedURLException mURLe) {
-                System.out.println("  Error - possibly missing URL for: " + fileDest.getName());
-            }
-            catch (final FileNotFoundException fnfe) {
-                String formatStr = "  Error - the LQ picture %s could not be found on the server. [%s] - %s";
-                System.out.printf((formatStr) + "%n", fileDest.getName(), url, fnfe.getMessage());
-            }
-            catch (final Exception ex) {
-                Logger.error(ex, "Error downloading pictures");
-            }
-            finally {
-                if (fos != null) {
-                    try {
-                        fos.close();
-                    }
-                    catch (IOException e) {
-                        System.out.println("  Error closing output stream");
-                    }
+                if (attemptDownload(url, decodedKey, p, buffer)) {
+                    saved = true;
+                    break;
+                }
+                if (cancel) {
+                    break;
                 }
             }
 
             update(count);
-            if (cardSkipped) {
+            if (!saved) {
                 skipped++;
             }
         }
 
         GuiBase.getInterface().preventSystemSleep(false);
+    }
+
+    /** Attempt a single URL. Returns true if the file was saved successfully. */
+    private boolean attemptDownload(String url, String decodedKey, Proxy p, byte[] buffer) {
+        boolean isJPG = true;
+        boolean isLogged = false;
+        boolean fullborder = false;
+        boolean saved = false;
+        int bufferLength;
+        File fileDest = new File(decodedKey);
+
+        FileOutputStream fos = null;
+        try {
+            final File base = fileDest.getParentFile();
+            if (FileUtil.ensureDirectoryExists(base)) { //ensure destination directory exists
+                URL imageUrl = new URL(url);
+                HttpURLConnection conn = (HttpURLConnection) imageUrl.openConnection(p);
+                identify(conn);
+                // don't allow redirections here -- they indicate 'file not found' on the server
+                // only allow redirections to consume Scryfall API
+                if(url.contains("api.scryfall.com")) {
+                    conn.setInstanceFollowRedirects(true);
+                    TimeUnit.MILLISECONDS.sleep(100);
+                } else {
+                    conn.setInstanceFollowRedirects(false);
+                }
+                conn.connect();
+
+                //if .full file is not found try fullborder
+                if ((conn.getResponseCode() == HttpURLConnection.HTTP_NOT_FOUND) && (url.contains(".full.jpg")))
+                {
+                    fullborder = true;
+                    conn.disconnect();
+                    url = TextUtil.fastReplace(url, ".full.jpg", ".fullborder.jpg");
+                    imageUrl = new URL(url);
+                    conn = (HttpURLConnection) imageUrl.openConnection(p);
+                    identify(conn);
+                    conn.setInstanceFollowRedirects(false);
+                    conn.connect();
+                }
+
+                // if file is not found and this is a JPG, give PNG a shot...
+                if ((conn.getResponseCode() == HttpURLConnection.HTTP_NOT_FOUND) && (url.endsWith(".jpg"))) {
+                    fullborder = false;
+                    isJPG = false;
+                    conn.disconnect();
+                    if(url.contains("/images/")){
+                        isLogged = true;
+                        System.out.println("File not found: .." + url.substring(url.lastIndexOf("/images/")+1));
+                    }
+                    url = url.substring(0,url.length() - 4) + ".png";
+                    imageUrl = new URL(TextUtil.fastReplace(url, ".fullborder.", ".full."));
+                    conn = (HttpURLConnection) imageUrl.openConnection(p);
+                    identify(conn);
+                    conn.setInstanceFollowRedirects(false);
+                    conn.connect();
+                }
+
+                if (fullborder) {
+                    fileDest = new File(TextUtil.fastReplace(decodedKey, ".full.jpg", ".fullborder.jpg"));
+                }
+
+                switch (conn.getResponseCode()) {
+                case HttpURLConnection.HTTP_OK:
+                    fos = new FileOutputStream(fileDest);
+                    InputStream inputStream = conn.getInputStream();
+                    while ((bufferLength = inputStream.read(buffer)) > 0) {
+                        fos.write(buffer, 0, bufferLength);
+                    }
+                    saved = true;
+                    break;
+                case HttpURLConnection.HTTP_NOT_FOUND:
+                    conn.disconnect();
+                    if(url.contains("/images/") && !isJPG && !isLogged)
+                        System.out.println("File not found: .." + url.substring(url.lastIndexOf("/images/")+1));
+                    break;
+                case HTTP_TOO_MANY_REQUESTS:
+                    // Scryfall limits access for 30s on a 429 and may ban clients that
+                    // keep pushing, so back off rather than hammering the next item.
+                    conn.disconnect();
+                    System.out.println("  Rate limited, waiting " + RATE_LIMIT_BACKOFF_MS / 1000 + "s: " + url);
+                    TimeUnit.MILLISECONDS.sleep(RATE_LIMIT_BACKOFF_MS);
+                    break;
+                default:
+                    conn.disconnect();
+                    System.out.println("  Connection failed for url: " + url);
+                    break;
+                }
+            } else {
+                System.out.println("  Can't create folder: " + base.getAbsolutePath());
+            }
+        }
+        catch (final ConnectException ce) {
+            System.out.println("  Connection refused for url: " + url);
+        }
+        catch (final MalformedURLException mURLe) {
+            System.out.println("  Error - possibly missing URL for: " + fileDest.getName());
+        }
+        catch (final FileNotFoundException fnfe) {
+            String formatStr = "  Error - the LQ picture %s could not be found on the server. [%s] - %s";
+            System.out.printf((formatStr) + "%n", fileDest.getName(), url, fnfe.getMessage());
+        }
+        catch (final Exception ex) {
+            Logger.error(ex, "Error downloading pictures");
+        }
+        finally {
+            if (fos != null) {
+                try {
+                    fos.close();
+                }
+                catch (IOException e) {
+                    System.out.println("  Error closing output stream");
+                }
+            }
+        }
+        return saved;
     }
 
     @SuppressWarnings("deprecation")
@@ -360,6 +404,16 @@ public abstract class GuiDownloadService implements Runnable {
          *  when you download the card price
          */
         return URLDecoder.decode(key);
+    }
+
+    /**
+     * Scryfall requires every request to carry an accurate User-Agent naming the
+     * application, plus an Accept header, and explicitly asks clients not to let the
+     * HTTP library pick the User-Agent for them. See https://scryfall.com/docs/api.
+     */
+    protected static void identify(final HttpURLConnection conn) {
+        conn.setRequestProperty("User-Agent", BuildInfo.getUserAgent());
+        conn.setRequestProperty("Accept", "*/*");
     }
 
     protected Proxy getProxy() {

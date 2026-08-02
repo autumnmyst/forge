@@ -254,6 +254,24 @@ public final class CardEdition implements Comparable<CardEdition> {
                 return null;
             return extraParams.get("variant");
         }
+
+        /**
+         * Scryfall set code this printing's image lives under, when it differs from the
+         * edition's own ScryfallCode. Needed for Forge-only groupings such as Resale
+         * Promos (PRES), whose cards are spread across many per-set promo sets.
+         */
+        public String getScryfallSet() {
+            if (extraParams == null)
+                return null;
+            return extraParams.get("scryfallset");
+        }
+
+        /** Scryfall collector number for this printing, paired with {@link #getScryfallSet()}. */
+        public String getScryfallCollectorNumber() {
+            if (extraParams == null)
+                return null;
+            return extraParams.get("scryfallcn");
+        }
     }
 
     private final static SimpleDateFormat formatter = new SimpleDateFormat("yyyy-MM-dd");
@@ -305,6 +323,8 @@ public final class CardEdition implements Comparable<CardEdition> {
 
     private final ListMultimap<String, EditionEntry> cardMap;
     private final List<EditionEntry> cardsInSet;
+    /** Collector number -> { scryfallSet, scryfallCollectorNumber }; null when the set declares none. */
+    private final Map<String, String[]> scryfallOverrides;
     private final ListMultimap<String, EditionEntry> tokenMap;
     // custom print sheets that will be loaded lazily
     private final Map<String, List<String>> customPrintSheetsToParse;
@@ -325,8 +345,34 @@ public final class CardEdition implements Comparable<CardEdition> {
                 MultimapBuilder.treeKeys(String.CASE_INSENSITIVE_ORDER).arrayListValues()::build
             )
         );
+        Map<String, String[]> overrides = null;
+        for (EditionEntry e : this.cardsInSet) {
+            String set = e.getScryfallSet();
+            String cn = e.getScryfallCollectorNumber();
+            if (set == null || cn == null || e.collectorNumber == null) {
+                continue;
+            }
+            if (overrides == null) {
+                overrides = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+            }
+            overrides.put(e.collectorNumber, new String[] { set, cn });
+        }
+        this.scryfallOverrides = overrides;
         this.tokenMap = tokens;
         this.customPrintSheetsToParse = customPrintSheetsToParse;
+    }
+
+    /**
+     * Where this printing's image actually lives on Scryfall, when that differs from
+     * {@code <scryfallCode>/<collectorNumber>}.
+     *
+     * @return {@code { scryfallSet, scryfallCollectorNumber }}, or null if no override.
+     */
+    public String[] getScryfallOverride(String collectorNumber) {
+        if (scryfallOverrides == null || collectorNumber == null) {
+            return null;
+        }
+        return scryfallOverrides.get(collectorNumber);
     }
 
     /**
@@ -365,7 +411,7 @@ public final class CardEdition implements Comparable<CardEdition> {
     public String getCode()  { return code;  }
     public String getCode2() { return code2; }
     public String getScryfallCode() { return scryfallCode.toLowerCase(); }
-    public String getTokensCode() { return tokensCode.toLowerCase(); }
+    public String getTokensCode() { return tokensCode == null ? "" : tokensCode.toLowerCase(); }
     public String getCardsLangCode() { return cardsLanguage.toLowerCase(); }
     public Type   getType()  { return type;  }
     public String getName()  { return name;  }
@@ -463,6 +509,12 @@ public final class CardEdition implements Comparable<CardEdition> {
     public boolean isModern() { return getDate().after(parseDate("2003-07-27")); } //8ED and above are modern except some promo cards and others
 
     public Multimap<String, EditionEntry> getTokens() { return tokenMap; }
+
+    /**
+     * The [other] section: emblems, embalm/eternalize helper cards, monarch, blessing and
+     * friends. These are card-like images the game shows but that aren't tokens proper.
+     */
+    public Multimap<String, EditionEntry> getOther() { return otherMap; }
 
     public String getTokenSet(String token) {
         if (tokenMap.containsKey(token)) {
