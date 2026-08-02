@@ -1001,13 +1001,32 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
      * shown and nothing else.
      */
     private void logReveal(final CardCollectionView cards, final ZoneType zone, final PlayerView owner) {
+        logReveal(cards, zone, owner, owner);
+    }
+
+    /**
+     * @param revealer who put the cards on show, which is not always whose cards they are:
+     *                 an effect can turn up another player's hand. Pass the owner when the
+     *                 two are the same and the line says "their" rather than naming them
+     *                 twice.
+     */
+    private void logReveal(final CardCollectionView cards, final ZoneType zone,
+            final PlayerView owner, final PlayerView revealer) {
         if (cards.isEmpty()) {
             return;
         }
+        final String zoneName = zone.getTranslatedName().toLowerCase();
+        // Third person throughout, the reader included, because that is how the rest of the
+        // log reads: it is a record of the game rather than a message to anyone in
+        // particular, and a line addressed to "you" would be the only one of its kind.
+        // Someone showing cards out of their own zone gets "their", since the line has
+        // already named them; only one player revealing another's has to say whose.
+        final String from = owner == revealer
+                ? localizer.getMessage("lblTheirZone", zoneName)
+                : Lang.getInstance().getPossessedObject(String.valueOf(owner), zoneName);
         getGame().fireEvent(new GameEventAddLog(GameLogEntryType.REVEAL,
-                localizer.getMessage("lblRevealLogEntry", Lang.joinHomogenous(cards),
-                        MessageUtil.mayBeYou(getLocalPlayerView(), owner),
-                        zone.getTranslatedName().toLowerCase())));
+                localizer.getMessage("lblRevealLogEntry", String.valueOf(revealer),
+                        Lang.joinHomogenous(cards), from)));
     }
 
     /** Their own card going on show to everyone else: recorded, not displayed back to them. */
