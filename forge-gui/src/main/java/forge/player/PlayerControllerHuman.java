@@ -938,6 +938,23 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
             message += " " + localizer.getMessage("lblPlayerZone", "{player's}", zone.getTranslatedName().toLowerCase());
         }
         final String fm = MessageUtil.formatMessage(message, getLocalPlayerView(), owner);
+        // Recorded whatever happens next. What the player was shown is worth being able to
+        // look up again whether or not they stopped to read it at the time, and the log has
+        // its own switch - the REVEAL category - for anyone who would rather it did not.
+        if (!cards.isEmpty()) {
+            logReveal(cards, zone, owner);
+        }
+        // Whether the player is passing and the reveal did not stop them - the yield
+        // surviving maybeInterruptOnReveal above is exactly them having said reveals are
+        // not worth stopping for. So only the window is dropped, not the reveal: one that
+        // opens while the game runs past it is just something else to dismiss.
+        //
+        // Auto-passing when there is nothing to do is a pass like any other and was
+        // stopping here too, so isPassing covers both - and only reads them, since this
+        // runs mid-resolution where retiring a yield would be someone else's business.
+        if (isPassing()) {
+            return;
+        }
         if (cards.isEmpty()) {
             getGui().message(MessageUtil.formatMessage(localizer.getMessage("lblThereNoCardInPlayerZone", "{player's}", zone.getTranslatedName().toLowerCase()),
                     getLocalPlayerView(), owner), fm);
@@ -970,6 +987,56 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
             getGui().updateRevealedCards(collection);
             endTempShowCards();
         }
+    }
+
+    /**
+     * Write a reveal to the game log as a single line naming the cards and where they
+     * came from, in place of putting it on screen.
+     * <p>
+     * Logged from here rather than from {@code GameAction}, where the reveal originates.
+     * The log belongs to the game and everyone reads the same one, while a reveal is shown
+     * to named players - so logging it at the point it is made would put cards an opponent
+     * alone was entitled to see in front of everybody. This runs once per viewer, and only
+     * this viewer is the local player, so what reaches the log is what the local player was
+     * shown and nothing else.
+     */
+    private void logReveal(final CardCollectionView cards, final ZoneType zone, final PlayerView owner) {
+        if (cards.isEmpty()) {
+            return;
+        }
+        getGame().fireEvent(new GameEventAddLog(GameLogEntryType.REVEAL,
+                localizer.getMessage("lblRevealLogEntry", Lang.joinHomogenous(cards),
+                        MessageUtil.mayBeYou(getLocalPlayerView(), owner),
+                        zone.getTranslatedName().toLowerCase())));
+    }
+
+    /** Their own card going on show to everyone else: recorded, not displayed back to them. */
+    @Override
+    public void logReveal(final CardCollectionView cards, final ZoneType zone, final Player owner) {
+        logReveal(cards, zone, PlayerView.get(owner));
+    }
+
+    /** Their own choice: recorded, not announced back to them. */
+    @Override
+    public void logValue(final SpellAbility saSource, final GameObject relatedTarget, final String value) {
+        if (saSource != null && saSource.isManaAbility()) {
+            // The same exclusion notifyOfValue makes, and it has to be made twice: the
+            // player who picks the colour is precisely the one a mana ability leaves out
+            // of the announcement, so this path is the only one they ever reach.
+            return;
+        }
+        getGame().fireEvent(new GameEventAddLog(GameLogEntryType.REVEAL,
+                MessageUtil.formatNotificationMessage(saSource, player, relatedTarget, value)));
+    }
+
+    /**
+     * Always shown and always waited for. This is why a prompt is still open, so passing
+     * past it would leave the player looking at an input that will not take their answer
+     * and no word of why.
+     */
+    @Override
+    public void notifyOfError(final String message) {
+        getGui().message(message, "");
     }
 
     public List<Card> manipulateCardList(final String title, final Iterable<Card> cards, final Iterable<Card> manipulable, final boolean toTop, final boolean toBottom, final boolean toAnywhere) {
@@ -1890,8 +1957,24 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
         yieldController.maybeInterruptOnReveal();
         final String message = MessageUtil.formatNotificationMessage(sa, player, realtedTarget, value);
         if (sa != null && sa.isManaAbility()) {
-            getGame().fireEvent(new GameEventAddLog(GameLogEntryType.LAND, message));
-        } else if (sa != null && sa.getHostCard() != null && getGui().isLibgdxPort()) {
+            // Which colour a dual or any-colour source was tapped for. Never shown and so
+            // never logged: the log is here to stand in for a window the player would
+            // otherwise have had, and this one never had one - it is a step in paying a
+            // cost, visible in the mana pool, and there is a line of it per tapped land.
+            return;
+        }
+        // Recorded whatever happens next, same as a reveal. Filed under REVEAL alongside
+        // them too, since the setting that governs both treats them as one thing - and
+        // unlike INFORMATION, that category is in the log at the default verbosity, so
+        // this is a record rather than somewhere the message quietly goes to die.
+        getGame().fireEvent(new GameEventAddLog(GameLogEntryType.REVEAL, message));
+        if (isPassing()) {
+            // Only the dialog is dropped. This is a sentence of news about a choice
+            // someone else made: nothing to look at, nothing to acknowledge, and now
+            // written down for anyone who wants to go back to it.
+            return;
+        }
+        if (sa != null && sa.getHostCard() != null && getGui().isLibgdxPort()) {
             CardView cardView;
             IPaperCard iPaperCard = sa.getHostCard().getPaperCard();
             if (iPaperCard != null)
@@ -3819,6 +3902,21 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
 
     public boolean mayAutoPass() {
         return yieldController.shouldAutoYield()
+                || yieldController.isAutoPassingNoActions(getLocalPlayerView());
+    }
+
+    /**
+     * Whether the player is passing, asked without disturbing the pass.
+     * <p>
+     * {@link #mayAutoPass()} is not a question. The {@code shouldAutoYield} behind it is a
+     * step in the priority loop: it retires a stack yield the moment it finds the stack
+     * empty, and advances the phase marker's state machine. That is correct for the loop
+     * that owns the pass and wrong for everyone else - asked from inside a resolution,
+     * where the stack has usually already been emptied, it cancelled the yield the player
+     * had set and handed priority back on the next spell.
+     */
+    private boolean isPassing() {
+        return yieldController.isYieldActive()
                 || yieldController.isAutoPassingNoActions(getLocalPlayerView());
     }
 

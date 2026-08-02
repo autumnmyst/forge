@@ -546,7 +546,7 @@ public class PhaseHandler implements java.io.Serializable, IHasForgeLog {
 
                 success = CombatUtil.validateAttackers(combat);
                 if (!success) {
-                    whoDeclares.getController().notifyOfValue(null, null, "Attack declaration invalid");
+                    whoDeclares.getController().notifyOfError("Attack declaration invalid");
                     continue;
                 }
 

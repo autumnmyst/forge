@@ -189,6 +189,33 @@ public abstract class PlayerController {
     /** Shows message to player to reveal chosen cardName, creatureType, number etc. AI must analyze API to understand what that is */
     public abstract void notifyOfValue(SpellAbility saSource, GameObject realtedTarget, String value);
 
+    /**
+     * Tell this player that what they just entered was rejected.
+     * <p>
+     * Kept apart from {@link #notifyOfValue} because it is the one thing on that channel
+     * which is not news. It is the reason a prompt is still sitting there waiting, so it
+     * has to be shown and has to be waited for however freely the player is passing
+     * everything else - and it is not worth a line in the log afterwards.
+     */
+    public void notifyOfError(String message) {
+        notifyOfValue(null, null, message);
+    }
+
+    /**
+     * Record something this player is not being shown because they already know it: a
+     * choice they have just made, or their own card being revealed to everybody else.
+     * <p>
+     * Skipping the display and skipping the record are two different decisions, and only
+     * the first of them is wanted here. A log with holes in it exactly where the player's
+     * own actions should be is harder to read back than one with everything in it.
+     */
+    public void logValue(SpellAbility saSource, GameObject relatedTarget, String value) {
+    }
+
+    /** @see #logValue */
+    public void logReveal(CardCollectionView cards, ZoneType zone, Player owner) {
+    }
+
     public abstract ImmutablePair<CardCollection, CardCollection> arrangeForScry(CardCollection topN);
     public abstract ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN);
 

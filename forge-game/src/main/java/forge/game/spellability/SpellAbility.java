@@ -2163,7 +2163,7 @@ public abstract class SpellAbility extends CardTraitBase implements ISpellAbilit
         // Check if meet MustTarget restriction
         if (!StaticAbilityMustTarget.meetsMustTargetRestriction(this)) {
             String message = Localizer.getInstance().getMessage("lblInvalidTargetSpecification");
-            getActivatingPlayer().getController().notifyOfValue(null, null, message);
+            getActivatingPlayer().getController().notifyOfError(message);
             return false;
         }
 

@@ -109,6 +109,10 @@ public class CDock implements ICDoc {
                 Map.entry(DockButtonId.OFFER_DRAW,     () -> matchUI.getGameController().drawOfferAction(DrawOfferMessage.Action.OFFER)));
         commands.forEach((id, cmd) -> view.getButton(id).setCommand(cmd));
 
+        // The one button whose state changes what the game does while you are not
+        // looking at it, so it is the one worth being able to read at a glance.
+        view.getButton(DockButtonId.AUTO_PASS).setAccent(VDock.ACCENT_ON);
+
         update();
     }
 
