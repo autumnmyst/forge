@@ -1027,6 +1027,9 @@ public class PlayArea extends CardPanelContainer implements CardPanelMouseListen
                 }
                 Animation.moveCard(toPanel);
             }
+            // The panels exist and are laid out now, so anything that just arrived can
+            // be faded up from its final position rather than appearing outright.
+            getMatchUI().getAnimator().onPanelsAdded(newPanels);
         }
         repaint();
     }

@@ -17,6 +17,7 @@
  */
 package forge.view.arcane;
 
+import java.awt.AlphaComposite;
 import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.Font;
@@ -294,20 +295,98 @@ public class CardPanel extends SkinnedPanel implements CardContainer, IDisposabl
 
     @Override
     public final void paint(final Graphics g) {
-        if (!displayEnabled) {
+        if (!displayEnabled || renderAlpha <= 0f) {
             return;
         }
         if (!isValid()) {
             super.validate();
         }
         Graphics2D g2d = (Graphics2D) g;
-        if (getTappedAngle() > 0) {
+        final boolean transformed = hasRenderTransform();
+        if (getTappedAngle() > 0 || transformed) {
             g2d = (Graphics2D) g2d.create();
+        }
+        if (transformed) {
+            applyRenderTransform(g2d);
+        }
+        if (getTappedAngle() > 0) {
             final float edgeOffset = cardWidth / 2f;
             g2d.rotate(getTappedAngle(), cardXOffset + edgeOffset, (cardYOffset + cardHeight)
                     - edgeOffset);
         }
         super.paint(g2d);
+        if (transformed) {
+            g2d.dispose();
+        }
+    }
+
+    // ---------------------------------------------------------------- render transform
+    //
+    // A purely cosmetic offset/rotation/scale/fade laid over wherever layout put this
+    // panel. Animations drive these instead of moving the panel, because PlayArea owns
+    // the real bounds and recomputes them on every doLayout() - a moved panel would be
+    // yanked back the next time anything on the battlefield changed. Resetting all four
+    // fields restores the panel exactly, so an interrupted animation leaves no trace.
+
+    private double renderOffsetX, renderOffsetY;
+    private double renderRotation;
+    private double renderScale = 1;
+    private float renderAlpha = 1f;
+
+    private boolean hasRenderTransform() {
+        return renderOffsetX != 0 || renderOffsetY != 0 || renderRotation != 0
+                || renderScale != 1 || renderAlpha < 1f;
+    }
+
+    private void applyRenderTransform(final Graphics2D g2d) {
+        if (renderAlpha < 1f) {
+            g2d.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, Math.max(0f, renderAlpha)));
+        }
+        g2d.translate(renderOffsetX, renderOffsetY);
+        if (renderRotation != 0 || renderScale != 1) {
+            // Pivot about the middle of the card face rather than the panel origin, which
+            // sits well outside it to leave room for the tap rotation.
+            final double cx = cardXOffset + cardWidth / 2.0;
+            final double cy = cardYOffset + cardHeight / 2.0;
+            g2d.translate(cx, cy);
+            g2d.rotate(renderRotation);
+            g2d.scale(renderScale, renderScale);
+            g2d.translate(-cx, -cy);
+        }
+    }
+
+    /** Cosmetic displacement from the laid-out position, in pixels. */
+    public final void setRenderOffset(final double dx, final double dy) {
+        this.renderOffsetX = dx;
+        this.renderOffsetY = dy;
+    }
+
+    /** Cosmetic tilt about the card's centre, in radians. */
+    public final void setRenderRotation(final double radians) {
+        this.renderRotation = radians;
+    }
+
+    /** Cosmetic scale about the card's centre; 1 is normal size. */
+    public final void setRenderScale(final double scale) {
+        this.renderScale = scale;
+    }
+
+    /** Cosmetic opacity; 0 hides the panel entirely without disturbing layout. */
+    public final void setRenderAlpha(final float alpha) {
+        this.renderAlpha = alpha;
+    }
+
+    public final float getRenderAlpha() {
+        return renderAlpha;
+    }
+
+    /** Drop every cosmetic adjustment, returning the panel to its laid-out appearance. */
+    public final void clearRenderTransform() {
+        renderOffsetX = 0;
+        renderOffsetY = 0;
+        renderRotation = 0;
+        renderScale = 1;
+        renderAlpha = 1f;
     }
 
     @Override
@@ -510,6 +589,12 @@ public class CardPanel extends SkinnedPanel implements CardContainer, IDisposabl
 
     @Override
     public final void doLayout() {
+        // dispose() clears the card and the image panel, but a disposed panel can still
+        // be reached by a repaint sweep before its container drops it, or by an
+        // animation that outlives the card. Laying one out dereferences both.
+        if (card == null || imagePanel == null) {
+            return;
+        }
         int borderSize = calculateBorderSize();
 
         final Point imgPos = new Point(cardXOffset + borderSize, cardYOffset + borderSize);
@@ -999,6 +1084,14 @@ public class CardPanel extends SkinnedPanel implements CardContainer, IDisposabl
             return;
         }
         final Point p = SwingUtilities.convertPoint(getParent(), b.x, b.y, rootPane);
+        if (hasRenderTransform()) {
+            // A displaced or enlarged card paints outside its own bounds, so repainting
+            // only those bounds would leave a smear along the path it travelled.
+            final int padX = (int) Math.ceil(Math.abs(renderOffsetX)) + b.width / 2;
+            final int padY = (int) Math.ceil(Math.abs(renderOffsetY)) + b.height / 2;
+            rootPane.repaint(p.x - padX, p.y - padY, b.width + padX * 2, b.height + padY * 2);
+            return;
+        }
         rootPane.repaint(p.x, p.y, b.width, b.height);
     }
 
@@ -1112,8 +1205,13 @@ public class CardPanel extends SkinnedPanel implements CardContainer, IDisposabl
         attachedToPanel = null;
         attachedPanels = null;
         stack = null;
-        imagePanel.setImage(null);
-        imagePanel = null;
+        // Disposing twice is legitimate: a panel removed from its container can still be
+        // in a stale list that setCardPanels() later sweeps, and the second pass must not
+        // fail on the image panel this one already dropped.
+        if (imagePanel != null) {
+            imagePanel.setImage(null);
+            imagePanel = null;
+        }
         card = null;
     }
 

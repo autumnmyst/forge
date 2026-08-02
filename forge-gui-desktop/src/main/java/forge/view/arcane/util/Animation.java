@@ -266,7 +266,11 @@ public abstract class Animation {
                 @Override
                 protected void onEnd() {
                     EventQueue.invokeLater(() -> {
-                        if (placeholder != null) {
+                        // The card can leave its zone while this animation is in flight -
+                        // dragging a land out of hand, or a spell resolving mid-snapback.
+                        // Its panel is then disposed and holds a null card, and reviving
+                        // it here would leave an unpaintable panel in the zone's list.
+                        if (placeholder != null && placeholder.getCard() != null) {
                             placeholder.setDisplayEnabled(true);
                             placeholder.setCard(placeholder.getCard());
                         }
@@ -290,7 +294,8 @@ public abstract class Animation {
      */
     public static void moveCard(final CardPanel placeholder) {
         Animation.invokeLater(() -> {
-            if (placeholder != null) {
+            // See the note in the animated overload: a disposed panel has no card left.
+            if (placeholder != null && placeholder.getCard() != null) {
                 placeholder.setDisplayEnabled(true);
                 // placeholder.setImage(imagePanel);
                 placeholder.setCard(placeholder.getCard());

@@ -109,6 +109,18 @@ public interface IGuiGame {
 
     void handleLandPlayed(CardView land);
 
+    /**
+     * Every game event, in order and uncoalesced, delivered on the game thread before
+     * the batching handler folds it into the next UI refresh.
+     * <p>
+     * The normal update path deliberately collapses intermediate states, which is right
+     * for keeping the display cheap but discards exactly what an animation needs to
+     * show. GUIs that animate can observe the raw stream here. Implementations must be
+     * quick and must not block - the game thread is waiting on this.
+     */
+    default void receiveRawGameEvent(GameEvent event) {
+    }
+
     void handleGameEvent(GameEvent event);
     default void handleGameEvents(List<GameEvent> events) {
         for (GameEvent event : events) {

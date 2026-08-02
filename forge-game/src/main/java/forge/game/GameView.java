@@ -223,7 +223,17 @@ public class GameView extends TrackableObject {
         for (final AttackingBand b : combat.getAttackingBands()) {
             if (b == null) continue;
             final GameEntity defender = combat.getDefenderByAttacker(b);
-            final List<Card> blockers = combat.getBlockers(b);
+            List<Card> blockers = combat.getBlockers(b);
+            // Prefer the damage assignment order once it has been chosen, so the view
+            // reports blockers in the sequence damage actually reaches them rather than
+            // in whatever order they were declared. Only meaningful for a single
+            // attacker, since the order is kept per attacker rather than per band.
+            if (b.getAttackers().size() == 1) {
+                final List<Card> ordered = combat.getOrderedBlockers(b.getAttackers().iterator().next());
+                if (ordered != null && ordered.size() == blockers.size() && ordered.containsAll(blockers)) {
+                    blockers = ordered;
+                }
+            }
             final boolean isBlocked = b.isBlocked() == Boolean.TRUE;
             combatView.addAttackingBand(
                     CardView.getCollection(b.getAttackers()),
