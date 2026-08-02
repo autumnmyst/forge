@@ -15,8 +15,19 @@ public abstract class Anim {
 
     private final long durationMs;
     private long elapsedMs;
+    private long deltaMs;
     private boolean started;
     private boolean done;
+
+    /**
+     * Time advanced by the frame currently being applied, already scaled by the
+     * playback speed. Animations that integrate their own motion rather than reading a
+     * progress fraction should step by this instead of assuming a frame length, or they
+     * ignore the speed setting and drift when frames are uneven.
+     */
+    protected final long getDeltaMs() {
+        return deltaMs;
+    }
 
     protected Anim(final long durationMs) {
         // A zero-length animation would divide by zero below and is never useful.
@@ -40,6 +51,7 @@ public abstract class Anim {
         if (done) {
             return true;
         }
+        this.deltaMs = Math.max(1L, deltaMs);
         if (!started) {
             started = true;
             onStart();

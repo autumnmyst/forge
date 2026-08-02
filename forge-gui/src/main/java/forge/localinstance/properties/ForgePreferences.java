@@ -99,7 +99,7 @@ public class ForgePreferences extends AbstractPreferences<ForgePreferences.FPref
         UI_SHOW_AUTOTAP_PREVIEW ("false"),
         UI_ACTIONABLE_HIGHLIGHT_COLOR ("66CCFF"),
         UI_ENABLE_ANIMATIONS ("true"),
-        /** Playback rate as a percentage; 100 is the designed pace, higher is faster. */
+        /** Playback rate as a percentage of the designed pace; lower is slower. */
         UI_ANIMATION_SPEED ("100"),
         UI_SHOW_LINKED_EXILE_CARDS ("true"),
         UI_LARGE_CARD_VIEWERS ("false"),

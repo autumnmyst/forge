@@ -380,6 +380,18 @@ public class CardPanel extends SkinnedPanel implements CardContainer, IDisposabl
         return renderAlpha;
     }
 
+    public final double getRenderOffsetX() {
+        return renderOffsetX;
+    }
+
+    public final double getRenderOffsetY() {
+        return renderOffsetY;
+    }
+
+    public final double getRenderScale() {
+        return renderScale;
+    }
+
     /** Drop every cosmetic adjustment, returning the panel to its laid-out appearance. */
     public final void clearRenderTransform() {
         renderOffsetX = 0;

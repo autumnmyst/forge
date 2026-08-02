@@ -29,11 +29,6 @@ public final class GhostAnim extends Anim {
         return new GhostAnim(snap, null, 0.12, 0.86f, durationMs);
     }
 
-    /** Fade while flying somewhere, for a card leaving the battlefield to another zone. */
-    public static GhostAnim flyTo(final CardSnapshot snap, final Point target, final long durationMs) {
-        return new GhostAnim(snap, target, -0.22, 0.55f, durationMs);
-    }
-
     private GhostAnim(final CardSnapshot snap, final Point target, final double spin,
             final float endScale, final long durationMs) {
         super(durationMs);

@@ -323,6 +323,12 @@ public abstract class CardPanelContainer extends SkinnedPanel {
 
         for (final CardPanel p : this.getCardPanels()) {
             if (!cardPanels.contains(p)) { //dispose of any card panels that have been removed
+                // Same hook as removeCardPanel. The hand replaces its whole panel list
+                // rather than removing one at a time, so without this a card leaving the
+                // hand is never seen going, and a land has no measured place to fly from.
+                if (matchUI != null) {
+                    matchUI.getAnimator().onPanelRemoved(p);
+                }
                 p.dispose();
             }
         }

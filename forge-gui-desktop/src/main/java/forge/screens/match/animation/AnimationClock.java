@@ -32,6 +32,16 @@ public final class AnimationClock {
     private final List<Anim> free = new ArrayList<>(4);
 
     private long lastTickNanos;
+    /** Playback rate from preferences; below 1 slows everything down. */
+    private volatile float userSpeed = 1f;
+
+    /**
+     * Set the playback rate. Applied here rather than inside the queue so it reaches
+     * every animation - the queued steps, the free ones, and the cards in flight alike.
+     */
+    public void setUserSpeed(final float speed) {
+        this.userSpeed = Math.max(0.1f, Math.min(5f, speed));
+    }
 
     public AnimationClock(final AnimationQueue queue, final AnimationLayer layer) {
         this.queue = queue;
@@ -48,6 +58,12 @@ public final class AnimationClock {
     public synchronized void addFree(final Anim anim) {
         if (anim != null) {
             free.add(anim);
+            // Registered with the layer as well, or it is only advanced and never drawn:
+            // the layer paints the queue's current step and its overlay list, and knows
+            // nothing about this one. Animations that merely move a card panel did not
+            // care, which is why it went unnoticed - but anything that paints, such as a
+            // fading ghost or a card sliding to a new slot, was invisible.
+            layer.addOverlayAnim(anim);
             start();
         }
     }
@@ -89,6 +105,8 @@ public final class AnimationClock {
             deltaMs = FRAME_MS;
         }
 
+        // Scale once, here, so nothing downstream has to remember to honour the setting.
+        deltaMs = Math.max(1L, (long) (deltaMs * userSpeed));
         boolean active = queue.tick(deltaMs);
 
         final long dt = deltaMs;

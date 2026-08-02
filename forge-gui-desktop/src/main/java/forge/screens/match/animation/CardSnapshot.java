@@ -23,10 +23,12 @@ public final class CardSnapshot {
 
     private final BufferedImage image;
     private final Rectangle bounds;
+    private final Point cardCentre;
 
-    private CardSnapshot(final BufferedImage image, final Rectangle bounds) {
+    private CardSnapshot(final BufferedImage image, final Rectangle bounds, final Point cardCentre) {
         this.image = image;
         this.bounds = bounds;
+        this.cardCentre = cardCentre;
     }
 
     public BufferedImage getImage() {
@@ -38,8 +40,13 @@ public final class CardSnapshot {
         return new Rectangle(bounds);
     }
 
+    /**
+     * Centre of the card face, which is not the centre of {@link #getBounds()} - the
+     * panel reserves room around the card for its tap rotation, off-centre. Use this for
+     * anything aimed at the card and the bounds only for drawing the copy.
+     */
     public Point getCenter() {
-        return new Point(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+        return new Point(cardCentre);
     }
 
     /**
@@ -60,16 +67,32 @@ public final class CardSnapshot {
         try {
             final BufferedImage img = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
             final Graphics2D g = img.createGraphics();
+            // Copy the card as it really looks, not as an animation is currently posing
+            // it. paint() refuses to draw a panel an animation has faded out, and would
+            // otherwise bake in that animation's offset and scale as well - so a card
+            // being re-captured mid-move came out blank or wrongly placed, and a tapped
+            // one could be copied before its rotation had been applied.
+            final double offX = panel.getRenderOffsetX();
+            final double offY = panel.getRenderOffsetY();
+            final double scale = panel.getRenderScale();
+            final float alpha = panel.getRenderAlpha();
+            panel.clearRenderTransform();
             try {
                 // paint() rather than print(): the panel's own paint applies the tap
-                // rotation and highlight frames, which should travel with the ghost.
+                // rotation and highlight frames, which should travel with the copy.
                 panel.paint(g);
             } finally {
                 g.dispose();
+                panel.setRenderOffset(offX, offY);
+                panel.setRenderScale(scale);
+                panel.setRenderAlpha(alpha);
             }
             final Point at = SwingUtilities.convertPoint(panel.getParent(),
                     panel.getX(), panel.getY(), reference);
-            return new CardSnapshot(img, new Rectangle(at.x, at.y, w, h));
+            final Point face = SwingUtilities.convertPoint(panel.getParent(),
+                    panel.getCardX() + panel.getCardWidth() / 2,
+                    panel.getCardY() + panel.getCardHeight() / 2, reference);
+            return new CardSnapshot(img, new Rectangle(at.x, at.y, w, h), face);
         } catch (final RuntimeException e) {
             // Panels mid-teardown can throw from paint; losing one ghost is harmless.
             return null;

@@ -144,6 +144,81 @@ public class AnimationQueueTest {
         assertEquals(log.size(), 6);
     }
 
+    /**
+     * Commit-only steps - a sound, a card refresh, a zone rebuild - must not register as
+     * backlog. They cost no time, and counting them made a single card being played look
+     * like a display far behind, which either accelerated playback or discarded the one
+     * animation that mattered.
+     */
+    @Test
+    public void commitOnlyStepsDoNotCountAsBacklog() {
+        final List<String> log = new ArrayList<>();
+        final AnimationQueue q = new AnimationQueue();
+        // Far more bookkeeping than the trim threshold, around one real animation.
+        for (int i = 0; i < 40; i++) {
+            q.enqueue(new AnimationStep("commit" + i).after(() -> log.add("commit")));
+        }
+        q.enqueue(step("real", log, 400));
+
+        q.tick(16);
+        assertEquals(log.stream().filter("commit"::equals).count(), 40,
+                "the bookkeeping should drain in one tick rather than be paced out");
+
+        // The drain stops short of starting the animation so it gets a whole tick of its
+        // own rather than whatever was left over.
+        q.tick(16);
+        assertTrue(log.contains("real:before"), "the real animation should have started");
+        assertFalse(log.contains("real:after"),
+                "and should still be playing, not trimmed away as backlog");
+    }
+
+    @Test
+    public void aRealBacklogStillGetsTrimmed() {
+        final List<String> log = new ArrayList<>();
+        final AnimationQueue q = new AnimationQueue();
+        for (int i = 0; i < 60; i++) {
+            q.enqueue(step("s" + i, log, 10_000));
+        }
+        q.tick(16);
+        assertTrue(q.getDepth() <= 21, "genuine motion backlog is still bounded, was " + q.getDepth());
+    }
+
+    /**
+     * A reservation exists so an animation can claim its place before it is known what
+     * goes in it, holding back the board refresh that the same effect already queued.
+     */
+    @Test
+    public void aReservationHoldsTheQueueUntilItIsSealed() {
+        final List<String> log = new ArrayList<>();
+        final AnimationQueue q = new AnimationQueue();
+        final AnimationStep reserved = new AnimationStep("reserved").reserved()
+                .after(() -> log.add("reserved"));
+        q.enqueue(reserved);
+        q.enqueue(new AnimationStep("board").after(() -> log.add("board")));
+
+        q.tick(16);
+        assertTrue(log.isEmpty(), "nothing may run past an unfilled reservation");
+
+        reserved.seal();
+        q.tick(16);
+        assertEquals(log, List.of("reserved", "board"), "and then both run, in order");
+    }
+
+    @Test
+    public void anAbandonedReservationDoesNotWedgeTheQueue() {
+        final List<String> log = new ArrayList<>();
+        final AnimationQueue q = new AnimationQueue();
+        q.enqueue(new AnimationStep("never").reserved().after(() -> log.add("never")));
+        q.enqueue(new AnimationStep("board").after(() -> log.add("board")));
+
+        // Never sealed: the board must still converge once the timeout expires.
+        for (int i = 0; i < 100 && log.size() < 2; i++) {
+            q.tick(16);
+        }
+        assertEquals(log, List.of("never", "board"));
+        assertTrue(q.isIdle());
+    }
+
     @Test
     public void pausedQueueHoldsWithoutDropping() {
         final List<String> log = new ArrayList<>();

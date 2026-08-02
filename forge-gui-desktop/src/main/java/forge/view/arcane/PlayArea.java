@@ -42,6 +42,8 @@ import forge.localinstance.properties.ForgePreferences.FPref;
 import forge.util.Localizer;
 import forge.model.FModel;
 import forge.screens.match.CMatchUI;
+import forge.screens.match.animation.CardSnapshot;
+import forge.screens.match.animation.MatchAnimator;
 import forge.toolbox.FScrollPane;
 import forge.toolbox.MouseTriggerEvent;
 import forge.view.arcane.util.Animation;
@@ -421,8 +423,22 @@ public class PlayArea extends CardPanelContainer implements CardPanelMouseListen
         return assignments;
     }
 
+    /** Card bounds before the last layout, so the change can be eased rather than jumped. */
+    private final Map<Integer, Rectangle> boundsBeforeLayout = new HashMap<>();
+    /**
+     * Card images from before the last layout, taken only when a reflow is coming.
+     * <p>
+     * A card copied *after* layout has already been given its new bounds but not
+     * necessarily its rescaled art, so on a resize the copy is the card's empty frame.
+     * Copying beforehand catches it whole - but it is far too expensive to do on every
+     * validation, hence the flag.
+     */
+    private final Map<Integer, CardSnapshot> imagesBeforeLayout = new HashMap<>();
+    private boolean reflowExpected;
+
     @Override
     public final void doLayout() {
+        captureBoundsForReflow();
         this.makeTokenRow = FModel.getPreferences().getPrefBoolean(FPref.UI_TOKENS_IN_SEPARATE_ROW);
         updateGroupScope();
         combatAssignments = buildCombatAssignments();
@@ -514,10 +530,85 @@ public class PlayArea extends CardPanelContainer implements CardPanelMouseListen
         this.setPreferredSize(new Dimension(maxRowWidth - this.cardSpacingX, y - this.cardSpacingY));
         this.revalidate();
         positionAllCards(lastTemplate);
+        animateReflow();
         repaint();
 
         super.doLayout();
     }
+
+    /** Remember where every card is sitting, just before layout moves them all. */
+    private void captureBoundsForReflow() {
+        boundsBeforeLayout.clear();
+        imagesBeforeLayout.clear();
+        if (getMatchUI() == null || !getMatchUI().getAnimator().isEnabled()) {
+            return;
+        }
+        final MatchAnimator animator = getMatchUI().getAnimator();
+        if (reflowExpected) {
+            for (final CardPanel p : getCardPanels()) {
+                if (p.getCard() != null && p.getCardWidth() > 0) {
+                    final CardSnapshot snap = CardSnapshot.capture(p, animator.getLayer());
+                    if (snap != null) {
+                        imagesBeforeLayout.put(p.getCard().getId(), snap);
+                    }
+                }
+            }
+        }
+        for (final CardPanel p : getCardPanels()) {
+            if (p.getCard() != null && p.getCardWidth() > 0) {
+                // Where the card *looks* like it is, not where layout last put it. A
+                // reflow already in flight is holding the card away from its laid-out
+                // position, and capturing that position instead would compute the next
+                // move from somewhere the card is not - which is the jump that made a
+                // second reflow arriving mid-animation look broken.
+                boundsBeforeLayout.put(p.getCard().getId(), new Rectangle(
+                        p.getCardX() + (int) Math.round(p.getRenderOffsetX()),
+                        p.getCardY() + (int) Math.round(p.getRenderOffsetY()),
+                        Math.max(1, (int) Math.round(p.getCardWidth() * p.getRenderScale())),
+                        p.getCardHeight()));
+            }
+        }
+    }
+
+    /**
+     * Ease each card from where it was to where layout has just put it.
+     * <p>
+     * A permanent entering or leaving reflows the whole battlefield - cards shift along
+     * their row, and the row is resized to fit. Left alone that is an instant jump for
+     * every other card on the board. This starts each one displaced by however far it
+     * moved and lets it settle, so the reorganisation is watchable and runs alongside the
+     * arriving card's own animation rather than after it.
+     */
+    private void animateReflow() {
+        if (boundsBeforeLayout.isEmpty() || getMatchUI() == null) {
+            return;
+        }
+        final MatchAnimator animator = getMatchUI().getAnimator();
+        for (final CardPanel p : getCardPanels()) {
+            if (p.getCard() == null) {
+                continue;
+            }
+            final Rectangle was = boundsBeforeLayout.get(p.getCard().getId());
+            if (was == null || was.width <= 0 || p.getCardWidth() <= 0) {
+                continue; // new to the board; it has an arrival animation of its own
+            }
+            final int dx = was.x - p.getCardX();
+            final int dy = was.y - p.getCardY();
+            final double scale = was.width / (double) p.getCardWidth();
+            // Ignore the sub-pixel churn of ordinary revalidation.
+            if (Math.abs(dx) < REFLOW_MIN_SHIFT && Math.abs(dy) < REFLOW_MIN_SHIFT
+                    && Math.abs(scale - 1) < REFLOW_MIN_SCALE) {
+                continue;
+            }
+            animator.reflow(p, dx, dy, scale, imagesBeforeLayout.get(p.getCard().getId()));
+        }
+        boundsBeforeLayout.clear();
+        imagesBeforeLayout.clear();
+        reflowExpected = false;
+    }
+
+    private static final int REFLOW_MIN_SHIFT = 3;
+    private static final double REFLOW_MIN_SCALE = 0.02;
 
     // Position all card panels
     private void positionAllCards(List<CardStackRow> template)  {
@@ -1015,6 +1106,10 @@ public class PlayArea extends CardPanelContainer implements CardPanelMouseListen
             }
         }
         if (needLayoutRefresh) {
+            // Cards have entered or left, so this layout is the one that will shuffle and
+            // resize everything else. Worth copying each card first so the reflow has an
+            // intact image to animate; ordinary revalidations are not.
+            reflowExpected = true;
             doLayout();
         }
 

@@ -42,12 +42,6 @@ public final class AnimationQueue {
     private AnimationStep current;
     private long holdRemainingMs;
     private boolean paused;
-    private float userSpeed = 1f;
-
-    /** Playback rate from preferences; 1 is the designed pace, higher is faster. */
-    public synchronized void setUserSpeed(final float speed) {
-        this.userSpeed = Math.max(0.1f, speed);
-    }
 
     /**
      * Append a step. Safe to call from the game thread - the step is not touched until
@@ -88,6 +82,12 @@ public final class AnimationQueue {
         boolean changed = false;
 
         for (int guard = 0; guard < MAX_STEPS_PER_TICK; guard++) {
+            // A reservation at the head holds everything behind it, which is the point:
+            // the board refresh caused by an effect is queued before the animation of
+            // that effect can be built, so the slot is claimed first and filled second.
+            if (current == null && !waitForReservation(scaled)) {
+                break;
+            }
             if (current == null && !startNext()) {
                 break;
             }
@@ -140,7 +140,7 @@ public final class AnimationQueue {
     /** Commit the oldest steps without showing them once the backlog is hopeless. */
     private void trimBacklog() {
         int guard = 0;
-        while (pending.size() > MAX_DEPTH && guard++ < 10000) {
+        while (animatedDepth() > MAX_DEPTH && guard++ < 10000) {
             if (current == null) {
                 startNext();
             }
@@ -148,12 +148,60 @@ public final class AnimationQueue {
         }
     }
 
-    private float speedScale() {
-        final int depth = pending.size();
-        if (depth <= CATCHUP_DEPTH) {
-            return userSpeed;
+    /**
+     * How far behind the display actually is, counted in steps that have something to
+     * show.
+     * <p>
+     * Most of the queue is not motion at all: a sound to play, a set of cards to refresh,
+     * a zone to rebuild. Those are ordering markers that cost no time - the drain loop
+     * takes them several at a tick - so counting them as backlog made a single land
+     * being played look like a display ten steps behind. Playback would then accelerate
+     * to catch up with a backlog that did not exist, or discard the one animation in the
+     * queue that mattered.
+     */
+    private int animatedDepth() {
+        int n = 0;
+        for (final AnimationStep s : pending) {
+            if (!s.isEmpty()) {
+                n++;
+            }
         }
-        return userSpeed * Math.min(MAX_SCALE, 1f + (depth - CATCHUP_DEPTH) * 0.5f);
+        return n;
+    }
+
+    /** Playback rate from the backlog alone; the user setting is applied by the clock. */
+    private float speedScale() {
+        final int depth = animatedDepth();
+        if (depth <= CATCHUP_DEPTH) {
+            return 1f;
+        }
+        return Math.min(MAX_SCALE, 1f + (depth - CATCHUP_DEPTH) * 0.5f);
+    }
+
+    /** How long a reservation may hold the queue before it is abandoned. */
+    private static final long RESERVE_TIMEOUT_MS = 700L;
+    private long reservedWaitMs;
+
+    /**
+     * @return false while the head of the queue is a reservation still being filled in,
+     *         which stalls playback deliberately. Force-sealed after
+     *         {@link #RESERVE_TIMEOUT_MS} so a reservation nobody completes cannot wedge
+     *         the display - the board must keep converging even if an animation is lost.
+     */
+    private boolean waitForReservation(final long deltaMs) {
+        final AnimationStep head = pending.peekFirst();
+        if (head == null || head.isSealed()) {
+            reservedWaitMs = 0L;
+            return true;
+        }
+        reservedWaitMs += deltaMs;
+        if (reservedWaitMs < RESERVE_TIMEOUT_MS) {
+            return false;
+        }
+        Logger.warn("Animation reservation '" + head.getLabel() + "' was never filled in");
+        head.seal();
+        reservedWaitMs = 0L;
+        return true;
     }
 
     /** Promote the next queued step to current and run its {@code before} hook. */
