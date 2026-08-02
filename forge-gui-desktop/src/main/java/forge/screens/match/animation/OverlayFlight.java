@@ -28,7 +28,8 @@ public final class OverlayFlight extends Anim {
     private final int dx, dy;
     private final float outFraction;
     private final boolean returns;
-    private double fromScale = 1;
+    /** What the copy must be scaled to by the end; 1 for anything that returns home. */
+    private double toScale = 1;
 
     private double x, y;
     private double scale = 1;
@@ -58,10 +59,13 @@ public final class OverlayFlight extends Anim {
      * into its destination box and moving inside it, instead of the whole card
      * travelling and shrinking.
      *
-     * @param fromScale the card's old width over its new one; above 1 when it shrank.
+     * @param toScale the card's new width over its old one; below 1 when it shrank. The
+     *                copy is already the old size, so the ramp runs from 1 to this - not
+     *                the other way about, which drew a shrinking card larger than it had
+     *                ever been and then snapped it down.
      */
     public static OverlayFlight reflow(final CardPanel panel, final CardSnapshot snap,
-            final Point toTopLeft, final double fromScale, final long durationMs) {
+            final Point toTopLeft, final double toScale, final long durationMs) {
         // Stated as where the copy is now and where it must end up, rather than as an
         // offset. The copy may have been taken before layout ran or after it, so its own
         // position is not a fixed reference and an offset would mean different things in
@@ -69,7 +73,7 @@ public final class OverlayFlight extends Anim {
         final Rectangle at = snap.getBounds();
         final OverlayFlight f = new OverlayFlight(panel, snap,
                 at.x - toTopLeft.x, at.y - toTopLeft.y, 1f, false, durationMs);
-        f.fromScale = fromScale;
+        f.toScale = toScale;
         f.start.setLocation(toTopLeft);
         return f;
     }
@@ -105,10 +109,11 @@ public final class OverlayFlight extends Anim {
                     : 1f - Ease.inOut((t - outFraction) / (1f - outFraction));
             scale = 1 + 0.06f * e;
         } else {
-            // Settling: start displaced and resized, and ease onto the panel's real
-            // position and size.
+            // Settling: start where the card was, at the size it was, and ease onto the
+            // panel's real position and size. The copy is a picture of the old card, so
+            // its scale starts at 1 by definition.
             e = 1f - Ease.inOut(t);
-            scale = Ease.lerp((float) fromScale, 1f, Ease.inOut(t));
+            scale = Ease.lerp(1f, (float) toScale, Ease.inOut(t));
         }
         x = start.x + dx * e;
         y = start.y + dy * e;
@@ -124,8 +129,14 @@ public final class OverlayFlight extends Anim {
 
     @Override
     public void draw(final Graphics2D g) {
-        final double cx = x + start.width / 2.0;
-        final double cy = y + start.height / 2.0;
+        // A lunge grows about the card's own centre, so its centre is where the card
+        // already is. A reflow instead resizes into a box whose top-left corner is the
+        // destination, so its centre has to follow the shrinking image - otherwise the
+        // copy ends up half the width difference away from the panel it hands over to,
+        // and the card jumps sideways the instant the animation clears.
+        final double drawn = returns ? 1 : scale;
+        final double cx = x + start.width * drawn / 2.0;
+        final double cy = y + start.height * drawn / 2.0;
         g.translate(cx, cy);
         g.scale(scale, scale);
         g.drawImage(image, -start.width / 2, -start.height / 2, null);

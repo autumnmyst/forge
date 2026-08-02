@@ -336,8 +336,13 @@ public class VField implements IVDoc<CField> {
     }
 
     public void updateDetails() {
-        // Update life total
-        final int life = player.getLife();
+        // Update life total. Asked of the animator rather than read straight off the
+        // player, because while animations are buffered the game has already run ahead:
+        // the number would otherwise show the outcome of a combat whose blows the player
+        // has not been shown landing yet.
+        final int life = matchUI == null || matchUI.getAnimator() == null
+                ? player.getLife()
+                : matchUI.getAnimator().displayedLife(player, player.getLife());
         lblLife.setText(String.valueOf(life));
         if (life > LIFE_CRITICAL) {
             lblLife.setForeground(FSkin.getColor(FSkin.Colors.CLR_TEXT));

@@ -4,6 +4,7 @@ import java.awt.Color;
 import java.awt.Graphics2D;
 import java.awt.Point;
 import java.util.List;
+import java.util.function.Supplier;
 
 /**
  * A stream of sparks travelling from a source to a destination, in the source card's
@@ -22,10 +23,12 @@ public final class BeamAnim extends Anim {
 
     private final Particles particles;
     private final List<Color> palette;
-    private final Point from;
-    private final Point to;
+    private final Supplier<Point> fromSource;
+    private final Supplier<Point> toSource;
     private final float impactStrength;
 
+    private Point from;
+    private Point to;
     private float lastT;
     private int spawned;
     private boolean burst;
@@ -36,16 +39,42 @@ public final class BeamAnim extends Anim {
      */
     public BeamAnim(final Point from, final Point to, final List<Color> palette,
             final float impactStrength, final long durationMs) {
+        this(() -> from, () -> to, palette, impactStrength, durationMs);
+    }
+
+    /**
+     * A beam whose ends are worked out when it starts rather than when it is built.
+     * <p>
+     * Needed wherever the thing being drawn to or from does not exist yet at build time.
+     * A permanent's enters-the-battlefield trigger is the case in point: the trigger is
+     * put on the stack before the permanent has a card panel, so asking then gives
+     * nothing and the trail fell back to being drawn out of the player. By the time the
+     * step actually plays, the board refresh ahead of it has built the panel.
+     * <p>
+     * A supplier returning null leaves that end unresolved and the beam simply does not
+     * draw, which is the same outcome as never having been given a point.
+     */
+    public BeamAnim(final Supplier<Point> from, final Supplier<Point> to, final List<Color> palette,
+            final float impactStrength, final long durationMs) {
         super(durationMs);
-        this.from = new Point(from);
-        this.to = new Point(to);
+        this.fromSource = from;
+        this.toSource = to;
         this.palette = palette;
         this.impactStrength = Math.max(1f, impactStrength);
         this.particles = new Particles(420);
     }
 
     @Override
+    protected void onStart() {
+        from = fromSource == null ? null : fromSource.get();
+        to = toSource == null ? null : toSource.get();
+    }
+
+    @Override
     protected void update(final float t) {
+        if (from == null || to == null) {
+            return;
+        }
         final long deltaMs = Math.max(1L, (long) ((t - lastT) * getDurationMs()));
         lastT = t;
 

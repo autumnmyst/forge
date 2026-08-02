@@ -53,6 +53,47 @@ public final class AnimationQueue {
         }
     }
 
+    /**
+     * Insert steps immediately behind one already queued, preserving their order.
+     * <p>
+     * Exists for the case where a slot has to be claimed before it is known how many
+     * steps will fill it. A reservation blocks the queue, so anything enqueued in the
+     * meantime - notably the board refresh caused by the same event - piles up behind it;
+     * appending the real steps would then put them after that refresh, which is the
+     * ordering the reservation was taken out to prevent. Splicing puts them where the
+     * slot was.
+     *
+     * @param marker a step already in the queue. If it has already been played the steps
+     *               are appended, which is the best that can be done and still correct.
+     */
+    public synchronized void enqueueBehind(final AnimationStep marker, final List<AnimationStep> steps) {
+        if (steps == null || steps.isEmpty()) {
+            return;
+        }
+        if (marker == null || !pending.contains(marker)) {
+            for (final AnimationStep s : steps) {
+                pending.addLast(s);
+            }
+            return;
+        }
+        final List<AnimationStep> rebuilt = new ArrayList<>(pending.size() + steps.size());
+        for (final AnimationStep s : pending) {
+            rebuilt.add(s);
+            if (s == marker) {
+                rebuilt.addAll(steps);
+            }
+        }
+        pending.clear();
+        pending.addAll(rebuilt);
+    }
+
+    // Deliberately no way to put a step at the front. There was one, for animations that
+    // could only be built after the step that created what they needed - and it reordered
+    // the queue as soon as the game ran ahead, because a single refresh builds panels for
+    // cards that entered at quite different times, and each insertion jumped the one
+    // before it. Anything that needs to play in event order must be queued in event order
+    // and work out its geometry when it plays; see BeamAnim's supplier constructor.
+
     public synchronized boolean isIdle() {
         return current == null && pending.isEmpty();
     }
@@ -231,6 +272,9 @@ public final class AnimationQueue {
         final AnimationStep done = current;
         current = null;
         run(done.getAfter(), done.getLabel(), "after");
+        // Marked after running, so anything attached from here on applies itself
+        // immediately rather than waiting for a step that has already gone by.
+        done.markPlayed();
     }
 
     /**

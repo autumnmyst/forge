@@ -309,13 +309,26 @@ public class CardPanel extends SkinnedPanel implements CardContainer, IDisposabl
         if (transformed) {
             applyRenderTransform(g2d);
         }
+        if (frozenImage != null) {
+            // The picture already contains the tap rotation and everything else the card
+            // was showing, so it is drawn flat - only the render transform above, which is
+            // the card's pose rather than its content, still applies.
+            g2d.drawImage(frozenImage, 0, 0, getWidth(), getHeight(), null);
+            if (g2d != g) {
+                g2d.dispose();
+            }
+            return;
+        }
         if (getTappedAngle() > 0) {
             final float edgeOffset = cardWidth / 2f;
             g2d.rotate(getTappedAngle(), cardXOffset + edgeOffset, (cardYOffset + cardHeight)
                     - edgeOffset);
         }
         super.paint(g2d);
-        if (transformed) {
+        // Whatever was created has to be released, and a tapped card creates one too -
+        // testing only for the transform leaked a Graphics on every repaint of a tapped
+        // permanent.
+        if (g2d != g) {
             g2d.dispose();
         }
     }
@@ -399,6 +412,82 @@ public class CardPanel extends SkinnedPanel implements CardContainer, IDisposabl
         renderRotation = 0;
         renderScale = 1;
         renderAlpha = 1f;
+    }
+
+    // ---------------------------------------------------------------- visual freeze
+    //
+    // Holds the card looking exactly as it did, until the animation explaining the change
+    // has reached it.
+    //
+    // Deferring the refresh call is not enough. Only the text overlays are cached when
+    // setCard() runs; counters, keyword icons, the mana cost and the highlight frames are
+    // all read off the live CardView inside paintChildren, so any repaint at all - and the
+    // animation clock causes one every frame - shows the new state immediately. Painting
+    // from a picture taken beforehand holds all of it at once, and needs no knowledge of
+    // which properties exist, which is what keeps this from becoming a list of special
+    // cases that grows with every card mechanic.
+
+    private java.awt.image.BufferedImage frozenImage;
+
+    public final boolean isVisualFrozen() {
+        return frozenImage != null;
+    }
+
+    /**
+     * Take a picture of the card as it looks now and paint that until thawed.
+     * <p>
+     * Deliberately captures without the render transform, so the freeze holds the card's
+     * <em>content</em> and not its pose: a frozen card can still flinch, slide or fade,
+     * because those are applied over the top of whatever is painted.
+     */
+    public final void freezeVisual() {
+        if (frozenImage != null || card == null || imagePanel == null) {
+            return;
+        }
+        // Whatever is being held has to be worth holding. A card whose art has not been
+        // fetched yet paints as an empty black frame, and freezing that substitutes the
+        // black frame for the card until something thaws it - far worse than letting the
+        // change this freeze was meant to delay simply show.
+        if (!imagePanel.hasImage()) {
+            return;
+        }
+        final int w = getWidth();
+        final int h = getHeight();
+        if (w <= 0 || h <= 0) {
+            return;
+        }
+        final double offX = renderOffsetX, offY = renderOffsetY;
+        final double rot = renderRotation, scale = renderScale;
+        final float alpha = renderAlpha;
+        try {
+            final java.awt.image.BufferedImage img =
+                    new java.awt.image.BufferedImage(w, h, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+            final Graphics2D g = img.createGraphics();
+            clearRenderTransform();
+            try {
+                paint(g);
+            } finally {
+                g.dispose();
+                renderOffsetX = offX;
+                renderOffsetY = offY;
+                renderRotation = rot;
+                renderScale = scale;
+                renderAlpha = alpha;
+            }
+            frozenImage = img;
+        } catch (final RuntimeException e) {
+            // A panel mid-teardown can throw from paint. Showing the live card early is a
+            // far better failure than not showing it at all.
+            frozenImage = null;
+        }
+    }
+
+    /** Show the card as it really is again. */
+    public final void thawVisual() {
+        if (frozenImage != null) {
+            frozenImage = null;
+            repaint();
+        }
     }
 
     @Override
@@ -1224,6 +1313,7 @@ public class CardPanel extends SkinnedPanel implements CardContainer, IDisposabl
             imagePanel.setImage(null);
             imagePanel = null;
         }
+        frozenImage = null;
         card = null;
     }
 

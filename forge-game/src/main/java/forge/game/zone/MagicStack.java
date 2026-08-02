@@ -582,6 +582,10 @@ public class MagicStack /* extends MyObservable */ implements Iterable<SpellAbil
 
         if (!thisHasFizzled) {
             game.copyLastState();
+            // Announce the resolution before it runs. Several of the events it goes on to
+            // fire - a life total moving, counters being placed - carry no source, so
+            // without this there is nothing to credit them to.
+            game.fireEvent(new GameEventSpellResolving(sa));
         }
 
         // Change controller of activating player if it was set in SA

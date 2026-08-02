@@ -222,6 +222,7 @@ public enum CSubmenuPreferences implements ICDoc {
         initializeAutoDecisionModeComboBox();
         initializeStackGroupPermanentsComboBox();
         initializeMaxStackDepthComboBox();
+        initializeAnimationSpeedComboBox();
         initializeCounterDisplayTypeComboBox();
         initializeCounterDisplayLocationComboBox();
         initializeGraveyardOrderingComboBox();
@@ -638,6 +639,30 @@ public enum CSubmenuPreferences implements ICDoc {
                 .findFirst()
                 .orElse(labels[0]);
         panel.setComboBox(comboBox, selectedLabel);
+    }
+
+    /**
+     * Playback rate for the match animations, as a percentage of the rate they were
+     * designed at. 100 is what the animations have always run at, so leaving this alone
+     * changes nothing.
+     */
+    private void initializeAnimationSpeedComboBox() {
+        final String[] values = {"50", "75", "100", "150", "200", "300"};
+        final Map<String, String> mapping = new LinkedHashMap<>();
+        final String[] labels = new String[values.length];
+        for (int i = 0; i < values.length; i++) {
+            labels[i] = values[i] + "%";
+            mapping.put(labels[i], values[i]);
+        }
+        final FComboBoxPanel<String> panel = this.view.getCbpAnimationSpeed();
+        final FComboBox<String> comboBox = createLocalizedComboBox(labels, FPref.UI_ANIMATION_SPEED, mapping);
+        final String saved = this.prefs.getPref(FPref.UI_ANIMATION_SPEED);
+        final String selected = mapping.entrySet().stream()
+                .filter(e -> e.getValue().equals(saved))
+                .map(Map.Entry::getKey)
+                .findFirst()
+                .orElse("100%");
+        panel.setComboBox(comboBox, selected);
     }
 
     private void initializeMaxStackDepthComboBox() {

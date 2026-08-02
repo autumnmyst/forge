@@ -310,6 +310,25 @@ public class ManaPool extends ManaConversionMatrix implements Iterable<Mana> {
         manaSpent.clear();
     }
 
+    /**
+     * Put back mana that was only ever spent to find out whether it could be.
+     * <p>
+     * Announcing this as mana gained would be a lie: the pool ends up exactly as it
+     * started, and nothing the player did produced anything. It matters because working
+     * out the auto-tap plan test-pays the cost, so with floating mana every recalculation
+     * would otherwise report a fresh gain and anything listening for one - a sound, an
+     * animation - would fire on it.
+     */
+    public void refundManaQuietly(List<Mana> manaSpent) {
+        for (final Mana m : manaSpent) {
+            addManaNoEvent(m);
+        }
+        if (!manaSpent.isEmpty()) {
+            owner.updateManaForView();
+        }
+        manaSpent.clear();
+    }
+
     public boolean canPayForShardWithColor(ManaCostShard shard, byte color) {
         if (shard.isOfKind(ManaAtom.COLORLESS) && color == ManaAtom.GENERIC) {
             return false; // FIXME: testing Colorless against Generic is a recipe for disaster, but probably there should be a better fix.
@@ -357,7 +376,7 @@ public class ManaPool extends ManaConversionMatrix implements Iterable<Mana> {
         if (cost.isPaid()) {
             // refund any mana taken from mana pool when test
             if (test) {
-                refundMana(manaSpentToPay);
+                refundManaQuietly(manaSpentToPay);
             }
             return true;
         }
