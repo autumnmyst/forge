@@ -68,39 +68,36 @@ public final class PanelAnim {
         };
     }
 
-    /** Fade a card out in place, for a permanent about to be removed. */
-    public static Anim fadeOut(final CardPanel panel, final long durationMs) {
-        return new Base(panel, durationMs) {
-            @Override
-            protected void update(final float t) {
-                if (panel == null) {
-                    return;
-                }
-                panel.setRenderAlpha(1f - Ease.in(t));
-                panel.setRenderScale(Ease.lerp(1f, 0.88f, t));
-                touch();
-            }
-        };
-    }
-
     /**
-     * Drive a card from a displacement back to its laid-out position - the settle a
-     * permanent makes after being dropped onto the battlefield.
+     * Ease a card from where it used to be onto where layout has just put it.
+     * <p>
+     * Battlefield layout is recomputed wholesale whenever a permanent enters or leaves -
+     * cards shift along their row and the whole row can be resized to fit. Applied
+     * directly that is a jump. Driven through the render transform the card appears to
+     * slide and resize into its new place, while layout keeps owning the real bounds.
      *
-     * @param fromDx starting offset from where layout has put the panel.
+     * @param fromDx     old position minus new, in pixels.
+     * @param fromScale  old width divided by new; 1 when only the position moved.
      */
-    public static Anim slideFrom(final CardPanel panel, final int fromDx, final int fromDy,
-            final long durationMs) {
+    public static Anim reflow(final CardPanel panel, final int fromDx, final int fromDy,
+            final double fromScale, final long durationMs) {
         return new Base(panel, durationMs) {
+            @Override
+            protected void onStart() {
+                if (panel != null) {
+                    panel.setRenderOffset(fromDx, fromDy);
+                    panel.setRenderScale(fromScale);
+                }
+            }
+
             @Override
             protected void update(final float t) {
                 if (panel == null) {
                     return;
                 }
-                final float e = Ease.backOut(t);
-                panel.setRenderOffset(fromDx * (1 - e), fromDy * (1 - e));
-                // Unwind the drag tilt over the first half, so it lands square.
-                panel.setRenderRotation(Math.toRadians(6) * (1 - Ease.out(Math.min(1f, t * 2f))));
+                final float e = 1f - Ease.inOut(t);
+                panel.setRenderOffset(fromDx * e, fromDy * e);
+                panel.setRenderScale(Ease.lerp((float) fromScale, 1f, Ease.inOut(t)));
                 touch();
             }
         };

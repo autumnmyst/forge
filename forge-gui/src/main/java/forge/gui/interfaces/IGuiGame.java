@@ -121,6 +121,21 @@ public interface IGuiGame {
     default void receiveRawGameEvent(GameEvent event) {
     }
 
+    /**
+     * Offer the GUI the chance to hold an event's sound back.
+     * <p>
+     * Sound is otherwise played the instant the game thread emits the event, which is
+     * right when nothing is being animated and wrong when something is: a creature's
+     * death would be heard while its death was still several animations away from being
+     * shown. A GUI that paces its display can play the clip at the point the player
+     * actually sees the thing happen.
+     *
+     * @return true if the GUI took ownership, meaning the caller must not play it.
+     */
+    default boolean deferGameEventSound(Runnable playSound) {
+        return false;
+    }
+
     void handleGameEvent(GameEvent event);
     default void handleGameEvents(List<GameEvent> events) {
         for (GameEvent event : events) {

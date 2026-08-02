@@ -157,7 +157,11 @@ public class FControlGameEventHandler extends IGameEventVisitor.Base<Void> {
         // so this is the only place an animation can see the individual steps.
         matchController.receiveRawGameEvent(ev);
         ev.visit(this);
-        SoundSystem.instance.receiveEvent(ev);
+        // Offered to the GUI first so a display that paces itself can play the clip when
+        // the event is shown rather than when it happened.
+        if (!matchController.deferGameEventSound(() -> SoundSystem.instance.receiveEvent(ev))) {
+            SoundSystem.instance.receiveEvent(ev);
+        }
     }
 
     private Void processEvent() {

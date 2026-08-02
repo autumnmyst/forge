@@ -6270,9 +6270,11 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
         DamageType damageType = DamageType.Normal;
         if (isPlaneswalker()) { // 120.3c
             subtractCounter(CounterEnumType.LOYALTY, damageIn, null, true);
+            damageType = DamageType.LoyaltyLoss;
         }
         if (isBattle()) {
             subtractCounter(CounterEnumType.DEFENSE, damageIn, null, true);
+            damageType = DamageType.LoyaltyLoss;
         }
         if (isCreature()) {
             if (source.isWitherDamage()) { // 120.3d
@@ -6288,10 +6290,14 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
                 setHasBeenDealtDeathtouchDamage(true);
                 damageType = DamageType.Deathtouch;
             }
-
-            // Play the Damage sound
-            game.fireEvent(new GameEventCardDamaged(CardView.get(this), CardView.get(source), damageIn, damageType));
         }
+
+        // Fired for anything that was actually dealt damage, not only creatures.
+        // Planeswalkers and battles take it as counter removal rather than marked damage,
+        // but it is still damage from a source - the DamageType.LoyaltyLoss case, which
+        // GameLogFormatter already handles and nothing previously produced. Leaving them
+        // out meant no sound and no animation for an attack on a planeswalker.
+        game.fireEvent(new GameEventCardDamaged(CardView.get(this), CardView.get(source), damageIn, damageType));
 
         return damageIn;
     }

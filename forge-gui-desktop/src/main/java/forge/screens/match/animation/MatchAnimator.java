@@ -10,17 +10,22 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
 
+import forge.card.MagicColor;
 import forge.game.GameEntityView;
 import forge.game.card.CardView;
 import forge.game.combat.CombatView;
 import forge.game.event.GameEvent;
 import forge.game.event.GameEventCardChangeZone;
+import forge.game.event.EventValueChangeType;
 import forge.game.event.GameEventCardDamaged;
+import forge.game.event.GameEventManaPool;
 import forge.game.event.GameEventPlayerDamaged;
 import forge.game.event.GameEventSpellAbilityCast;
 import forge.game.event.GameEventSpellRemovedFromStack;
@@ -77,6 +82,8 @@ public final class MatchAnimator {
     private final Map<Integer, ZoneType> departing = new HashMap<>();
     /** Cards that just arrived on a battlefield, to be faded in once their panel exists. */
     private final Set<Integer> arriving = new HashSet<>();
+    /** Zone each arriving card came out of; null means it was created, i.e. a token. */
+    private final Map<Integer, ZoneType> arrivedFrom = new HashMap<>();
 
     /** Damage grouped by source, flushed on the next EDT pass. See {@link #flushDamage()}. */
     private final Map<Integer, DamageGroup> pendingDamage = new LinkedHashMap<>();
@@ -105,7 +112,7 @@ public final class MatchAnimator {
 
     /** Re-read preferences; called when the settings screen changes them. */
     public void refreshPrefs() {
-        queue.setUserSpeed(FModel.getPreferences().getPrefInt(FPref.UI_ANIMATION_SPEED) / 100f);
+        clock.setUserSpeed(FModel.getPreferences().getPrefInt(FPref.UI_ANIMATION_SPEED) / 100f);
     }
 
     /**
@@ -119,21 +126,73 @@ public final class MatchAnimator {
 
     public void dispose() {
         clock.stop();
+        soundThread.shutdownNow();
         queue.skipAll();
         departing.clear();
         arriving.clear();
+        arrivedFrom.clear();
+        awaitingOrigin.clear();
         pendingDamage.clear();
         synchronized (pendingCasts) {
             pendingCasts.clear();
         }
-        synchronized (heldCards) {
-            for (final HeldCard h : heldCards.values()) {
-                h.finish();
-                layer.removeOverlayAnim(h);
-            }
-            heldCards.clear();
-            castConfirmed.clear();
+    }
+
+    /**
+     * Hold a UI refresh back until the animations already queued have played.
+     * <p>
+     * This is what makes the buffer a buffer. Without it the queue only delayed the
+     * <em>animations</em> - the board itself was still repainted the moment the game
+     * thread got round to it, so a creature vanished while its death was still playing
+     * and an attacker's victim updated before the blow landed.
+     * <p>
+     * The refresh becomes a step of its own at the back of the queue, so it happens
+     * after everything currently in flight and before anything queued later. Ordering is
+     * preserved either way, and the skip hotkey runs the whole backlog at once, so the
+     * board still converges on the real game state.
+     *
+     * @return true if the refresh was taken over, meaning the caller must not run it.
+     */
+    public boolean defer(final String label, final Runnable refresh) {
+        if (refresh == null || !isEnabled() || queue.isIdle()) {
+            return false;
         }
+        queue.enqueue(new AnimationStep(label).after(refresh));
+        clock.start();
+        return true;
+    }
+
+    /**
+     * Plays sound off the EDT, in order, one clip at a time.
+     * <p>
+     * Needed because {@code AudioClip.play} sleeps on whichever thread calls it when the
+     * same clip is already running, to keep a burst of identical sounds from merging.
+     * That is harmless on the game thread, which is where sound normally comes from, but
+     * would stall the display if a queued clip were played from the EDT.
+     */
+    private final ExecutorService soundThread = Executors.newSingleThreadExecutor(r -> {
+        final Thread t = new Thread(r, "Animation sound");
+        t.setDaemon(true);
+        return t;
+    });
+
+    /**
+     * Hold a sound back until the animation it belongs to is on screen.
+     *
+     * @return true if the sound was taken over, meaning the caller must not play it.
+     */
+    public boolean deferSound(final Runnable playSound) {
+        if (playSound == null) {
+            return false;
+        }
+        return defer("sound", () -> {
+            // The match can end while clips are still queued behind animations, and the
+            // executor is shut down as part of that teardown. A sound nobody will hear
+            // is not worth an exception.
+            if (!soundThread.isShutdown()) {
+                soundThread.execute(playSound);
+            }
+        });
     }
 
     // ------------------------------------------------------------------ event intake
@@ -149,9 +208,12 @@ public final class MatchAnimator {
         }
         try {
             if (ev instanceof GameEventCardDamaged e) {
-                recordDamage(e.source(), e.card(), null, e.amount());
+                // Read here, on the game thread as the blow lands, not at flush time.
+                recordDamage(e.source(), e.card(), null, e.amount(),
+                        e.source() != null && e.source().isAttacking());
             } else if (ev instanceof GameEventPlayerDamaged e) {
-                recordDamage(e.source(), null, e.target(), e.amount());
+                // This one states outright whether it was combat damage.
+                recordDamage(e.source(), null, e.target(), e.amount(), e.combat());
             } else if (ev instanceof GameEventCardChangeZone e) {
                 recordZoneChange(e);
             } else if (ev instanceof GameEventSpellAbilityCast e) {
@@ -160,6 +222,8 @@ public final class MatchAnimator {
                 resolveCast(e);
             } else if (ev instanceof GameEventSpellRemovedFromStack e) {
                 forgetCast(e.sa());
+            } else if (ev instanceof GameEventManaPool e) {
+                recordManaAdded(e);
             }
             // Note there is no token-created case: GameEventTokenCreated carries no
             // payload at all, so tokens are recognised by CardView.isToken() when their
@@ -176,170 +240,35 @@ public final class MatchAnimator {
         }
         final ZoneType from = e.from() == null ? null : e.from().zoneType();
         final ZoneType to = e.to() == null ? null : e.to().zoneType();
+        if (TRACE_ARRIVALS) {
+            System.out.println("[anim] zoneChange " + card.getName() + " id=" + card.getId()
+                    + " " + from + " -> " + to);
+        }
         synchronized (this) {
-            if (to == ZoneType.Stack) {
-                // Leaving for the stack is the start of a cast, not a disappearance: the
-                // card is picked up and carried until the cast is decided.
-                departing.put(card.getId(), ZoneType.Stack);
-            } else if (from == ZoneType.Hand && to == ZoneType.Battlefield) {
-                // A land, which never touches the stack. Carried straight across so it
-                // flies from the hand to its slot rather than blinking between the two.
-                departing.put(card.getId(), ZoneType.Battlefield);
+            // Only the two ends of the battlefield matter: something arriving gets
+            // particles run to it, something leaving fades out.
+            if (to == ZoneType.Battlefield) {
                 arriving.add(card.getId());
-            } else if (from == ZoneType.Battlefield && to != ZoneType.Battlefield) {
+                arrivedFrom.put(card.getId(), from);
+                // Deliberately no queue reservation here. Reserving a slot works for a
+                // resolution, which always fills it, but an arrival has several paths
+                // that may not - and a reservation the queue gives up on has already
+                // played by the time it is filled, so the reveal attached to it never
+                // runs and the card stays invisible. An ETB trigger occasionally beating
+                // its own creature on screen is a far better outcome than a lost card.
+                //
+                // The panel may already exist - see awaitZoneChange. Settle it on the EDT,
+                // which is where panels may be touched.
+                FThreads.invokeInEdtLater(() -> claimAwaitingPanel(card, from));
+                if (from == ZoneType.Hand) {
+                    // A land: its origin is the card still sitting in hand, so the hand
+                    // panel has to be measured before the zone refresh takes it away.
+                    departing.put(card.getId(), ZoneType.Battlefield);
+                }
+            } else if (from == ZoneType.Battlefield) {
                 departing.put(card.getId(), to);
-            } else if (to == ZoneType.Battlefield) {
-                arriving.add(card.getId());
             }
         }
-    }
-
-    // ------------------------------------------------------------------ cards in flight
-
-    /** Cards currently being cast, drawn in flight from hand to stack to wherever they land. */
-    private final Map<Integer, HeldCard> heldCards = new HashMap<>();
-
-    /** Where a casting card comes to rest once it is on the stack: the stack panel. */
-    private Point stackAnchor() {
-        final Point p = anchorOf(matchUI.getCStack().getView().getParentCell());
-        return p != null ? p : new Point(layer.getWidth() / 2, layer.getHeight() / 3);
-    }
-
-    /**
-     * Where a card waits while its costs are being settled: the prompt, which is where
-     * the game is asking for the payment. Falls back to the stack, since that is where
-     * it is headed next anyway.
-     */
-    private Point paymentAnchor() {
-        final Point p = anchorOf(matchUI.getCPrompt().getView().getParentCell());
-        return p != null ? p : stackAnchor();
-    }
-
-    private Point anchorOf(final JComponent cell) {
-        try {
-            final Rectangle bounds = boundsInLayer(cell);
-            if (bounds != null && bounds.width > 0) {
-                return new Point(bounds.x + bounds.width / 2, bounds.y + Math.min(90, bounds.height / 2));
-            }
-        } catch (final RuntimeException e) {
-            // The panel may not be laid out yet.
-        }
-        return null;
-    }
-
-    /** Cards whose costs are fully paid, so they have really reached the stack. */
-    private final Set<Integer> castConfirmed = new HashSet<>();
-    /**
-     * Pick a card up out of its hand panel and carry it for the rest of the play.
-     * <p>
-     * Taken at the moment the panel is removed, which is the last instant its pixels can
-     * be copied, and started from exactly where the card was sitting - so the flight
-     * begins at the card the player just clicked.
-     */
-    private void beginHold(final CardPanel panel, final Point destination) {
-        final CardView card = panel.getCard();
-        if (card == null) {
-            return;
-        }
-        synchronized (heldCards) {
-            if (heldCards.containsKey(card.getId())) {
-                return;
-            }
-        }
-        final CardSnapshot snap = CardSnapshot.capture(panel, layer);
-        if (snap != null) {
-            hold(card, snap, snap.getCenter(), destination);
-        }
-    }
-
-    private void hold(final CardView card, final CardSnapshot snap, final Point at,
-            final Point destination) {
-        final HeldCard heldCard = new HeldCard(snap, CardColors.of(card, canShow(card)));
-        if (at != null) {
-            heldCard.snapTo(at);
-        }
-        synchronized (heldCards) {
-            final HeldCard previous = heldCards.put(card.getId(), heldCard);
-            if (previous != null) {
-                previous.finish();
-                layer.removeOverlayAnim(previous);
-            }
-        }
-        layer.addOverlayAnim(heldCard);
-        // Straight to the stack if the costs are already settled - which for an
-        // auto-paid spell they are by now. Otherwise it waits at the prompt, where the
-        // game is asking for the payment, and moves on once that is done.
-        heldCard.moveTo(isCastConfirmed(card.getId()) ? stackAnchor() : destination, 0.85);
-        clock.start();
-    }
-
-    private boolean isCastConfirmed(final int cardId) {
-        synchronized (heldCards) {
-            return castConfirmed.contains(cardId);
-        }
-    }
-
-    /** The costs are paid: send the hovering card to the stack. */
-    private void onCastConfirmed(final CardView card) {
-        if (card == null) {
-            return;
-        }
-        synchronized (heldCards) {
-            castConfirmed.add(card.getId());
-        }
-        final HeldCard heldCard = takeHeld(card.getId());
-        if (heldCard != null) {
-            heldCard.moveTo(stackAnchor(), 0.85);
-            clock.start();
-        }
-    }
-
-    private HeldCard takeHeld(final int cardId) {
-        synchronized (heldCards) {
-            final HeldCard heldCard = heldCards.get(cardId);
-            if (heldCard != null && heldCard.isDone()) {
-                // Already played out; the layer has dropped it and so should this map.
-                heldCards.remove(cardId);
-                castConfirmed.remove(cardId);
-                return null;
-            }
-            return heldCard;
-        }
-    }
-
-    private void dropHeld(final int cardId) {
-        synchronized (heldCards) {
-            heldCards.remove(cardId);
-            castConfirmed.remove(cardId);
-        }
-    }
-
-    /** Let go of a resolved cast; it lands if a permanent appears, dissolves otherwise. */
-    private void releaseHeld(final CardView card) {
-        if (card == null) {
-            return;
-        }
-        final HeldCard heldCard = takeHeld(card.getId());
-        if (heldCard != null) {
-            heldCard.beginRelease();
-            clock.start();
-        }
-    }
-
-    /** Send a cancelled or countered cast back where it came from. */
-    private void returnHeld(final CardView card) {
-        if (card == null) {
-            return;
-        }
-        final HeldCard heldCard = takeHeld(card.getId());
-        if (heldCard == null) {
-            return;
-        }
-        dropHeld(card.getId());
-        final Point home = handAnchor(card);
-        heldCard.moveTo(home, 0.7);
-        heldCard.beginRelease();
-        clock.start();
     }
 
     // ------------------------------------------------------------------ spell resolution
@@ -349,6 +278,14 @@ public final class MatchAnimator {
         private final CardView source;
         private final List<CardView> cardTargets = new ArrayList<>(2);
         private final List<PlayerView> playerTargets = new ArrayList<>(1);
+        /**
+         * Where each targeted card was when the spell was cast.
+         * <p>
+         * Needed because a spell that destroys what it targets has already removed the
+         * card's panel by the time it resolves, so asking then gives nothing to draw to -
+         * removal spells drew no beam at all and fell through to the catch-all spark.
+         */
+        private final Map<Integer, Point> targetPoints = new HashMap<>();
 
         CastRecord(final CardView source) {
             this.source = source;
@@ -371,14 +308,6 @@ public final class MatchAnimator {
 
     private void recordCast(final GameEventSpellAbilityCast e) {
         final StackItemView si = e.si();
-        // This event is fired from MagicStack.add, reached only once the cost payment has
-        // succeeded - so it is the moment every cost is settled and the card genuinely
-        // arrives on the stack. Handled before the target bookkeeping below, which bails
-        // out early for spells that target nothing.
-        if (si != null) {
-            final CardView host = si.getSourceCard();
-            FThreads.invokeInEdtNowOrLater(() -> onCastConfirmed(host));
-        }
         if (si == null || e.sa() == null) {
             return;
         }
@@ -397,9 +326,24 @@ public final class MatchAnimator {
                 }
             }
         }
-        if (rec.targetCount() == 0) {
-            return; // nothing to draw a line to
-        }
+        // Show it being put on the stack: out of the permanent whose ability it is, or
+        // out of the player who cast it. This is the half of the story the stack itself
+        // cannot tell, and it happens once, here, at cast time.
+        final CardView host = si.getSourceCard();
+        final PlayerView activator = si.getActivatingPlayer();
+        FThreads.invokeInEdtLater(() -> {
+            enqueueOntoStack(host, activator);
+            // Measure the targets now, while they are all still on the board.
+            for (final CardView c : rec.cardTargets) {
+                final Point at = centreOf(c);
+                if (at != null) {
+                    rec.targetPoints.put(c.getId(), at);
+                }
+            }
+        });
+
+        // Recorded even with no targets: an untargeted ability still resolves, and gets
+        // a pulse at its source rather than a line to anywhere.
         synchronized (pendingCasts) {
             pendingCasts.put(e.sa(), rec);
             // Anything countered or otherwise removed without a resolution event would
@@ -420,10 +364,6 @@ public final class MatchAnimator {
         synchronized (pendingCasts) {
             pendingCasts.remove(sa);
         }
-        // Countered, or the player backed out: the card is going somewhere other than
-        // resolution, so send the held copy home rather than landing it anywhere.
-        final CardView host = sa.getHostCard();
-        FThreads.invokeInEdtLater(() -> returnHeld(host));
     }
 
     /** Draw the spell reaching its targets, at the moment it actually resolves. */
@@ -432,30 +372,108 @@ public final class MatchAnimator {
         synchronized (pendingCasts) {
             rec = pendingCasts.remove(e.spell());
         }
-        final CardView host = e.spell() == null ? null : e.spell().getHostCard();
-        // Let go of the card either way: a fizzled spell still leaves the stack.
-        FThreads.invokeInEdtLater(() -> releaseHeld(host));
         if (rec == null || e.hasFizzled()) {
             // A fizzled spell never reached anything, so showing it connect would lie.
             return;
         }
-        FThreads.invokeInEdtLater(() -> enqueueResolution(rec));
+        // Claim the slot here, on the game thread, before returning. A resolution's own
+        // board changes - the creature it destroyed leaving play - are announced before
+        // this event, so their refresh is already queued for the EDT. Reserving now puts
+        // this animation ahead of that refresh; filling it in afterwards would put it
+        // behind, which is why the beam used to arrive after the creature had gone.
+        final AnimationStep step = new AnimationStep("resolve:" + rec.source.getName()).reserved();
+        queue.enqueue(step);
+        clock.start();
+        FThreads.invokeInEdtLater(() -> {
+            try {
+                enqueueResolution(rec, step);
+            } finally {
+                step.seal();
+            }
+        });
     }
 
-    private void enqueueResolution(final CastRecord rec) {
-        final Point from = centreOf(rec.source);
-        if (from == null) {
+    /**
+     * Show a spell or ability arriving on the stack, out of whatever put it there.
+     * <p>
+     * A permanent's own activated or triggered ability comes out of that permanent; a
+     * spell a player casts comes out of the player, since the card was in a hand nobody
+     * else can see. This is the half of the story the stack cannot tell, and it plays
+     * once, here, when the thing is put there - after which the stack is the origin for
+     * everything the resolution goes on to do.
+     */
+    private void enqueueOntoStack(final CardView host, final PlayerView activator) {
+        enqueueOntoStack(host, activator, true);
+    }
+
+    private void enqueueOntoStack(final CardView host, final PlayerView activator,
+            final boolean mayRetry) {
+        final Point to = stackAnchor();
+        Point from = centreOf(host);
+        if (from == null && mayRetry && host != null && host.getZone() == ZoneType.Battlefield) {
+            // An enters-the-battlefield trigger is put on the stack before the permanent's
+            // panel has been built, so there is nowhere to draw from yet. Falling back to
+            // the player here would be wrong - the ability is the permanent's, not the
+            // player's - so give the board one pass to catch up first.
+            FThreads.invokeInEdtLater(() -> enqueueOntoStack(host, activator, false));
             return;
         }
+        if (from == null) {
+            from = avatarCentre(activator);
+        }
+        if (from == null || to == null) {
+            return;
+        }
+        queue.enqueue(new AnimationStep("cast:" + (host != null ? host.getName() : "ability"))
+                .add(new BeamAnim(from, to, CardColors.of(host, canShow(host)), 1f, 420)));
+        clock.start();
+    }
+
+    /**
+     * Whether resolving this card puts it onto the battlefield.
+     * <p>
+     * A creature, artifact, enchantment or planeswalker spell resolves into play, and
+     * its arrival animation already draws the stack-to-battlefield beam. Sparking as
+     * well would be a second, redundant flourish on top of it - and the spark lands on
+     * the card itself, which by then is sitting on the battlefield, so it reads as the
+     * effect happening in the wrong place entirely.
+     * <p>
+     * Read off the card rather than inferred from what appears afterwards, so it needs
+     * no correlation between the resolve event and the zone change that follows it.
+     */
+    private static boolean becomesPermanent(final CardView card) {
+        try {
+            return card != null && card.getCurrentState() != null
+                    && card.getCurrentState().getType() != null
+                    && card.getCurrentState().getType().isPermanent();
+        } catch (final RuntimeException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Fill in the slot reserved when the resolution was announced.
+     *
+     * @param step already in the queue, ahead of the board refresh this effect caused.
+     */
+    private void enqueueResolution(final CastRecord rec, final AnimationStep step) {
+        // Everything a resolution does comes out of the stack, because that is where the
+        // spell or ability is. Its trip out of its source was already shown when it was
+        // put there, so repeating that here would tell the same half of the story twice.
+        final Point from = stackAnchor();
         final List<Color> palette = CardColors.of(rec.source, canShow(rec.source));
-        final AnimationStep step = new AnimationStep("resolve:" + rec.source.getName());
 
         // One beam per target however many there are, the way the targeting arrows draw
         // one arrow per target. A spell that names five creatures is still hitting five
         // specific creatures, and sweeping the board instead would claim it hit
         // everything. A sweep is for effects with no targets at all.
         for (final CardView c : rec.cardTargets) {
-            final Point to = centreOf(c);
+            // Live position first, so a target that moved is still followed; the position
+            // taken at cast time as a fallback, for one the spell has just destroyed.
+            Point to = centreOf(c);
+            if (to == null) {
+                to = rec.targetPoints.get(c.getId());
+            }
             if (to != null) {
                 step.add(new BeamAnim(from, to, palette, 1f, 480));
             }
@@ -466,9 +484,184 @@ public final class MatchAnimator {
                 step.add(new BeamAnim(from, to, palette, 1f, 480));
             }
         }
-        if (!step.isEmpty()) {
-            queue.enqueue(step);
+        if (step.isEmpty() && !becomesPermanent(rec.source)) {
+            // The catch-all: nothing targeted, and nothing about to enter play either, so
+            // the ability simply did its work. Sparked at the source card if it is still
+            // on the board - a prowess trigger, say - and at the stack if it is not.
+            final Point at = centreOf(rec.source);
+            step.add(new ImpactAnim(at != null ? at : from, palette, 2f, 420, 0f));
+        }
+        // Already queued. Left empty for a permanent spell, whose arrival draws the beam
+        // to where it lands; an empty step simply drains.
+        clock.start();
+    }
+
+    /**
+     * Show a permanent arriving: particles run from wherever it came from to the slot it
+     * will occupy, and only when they land does the card itself appear.
+     * <p>
+     * This replaces carrying the card across the board. The particles say the same thing
+     * without a second copy of the card fighting the real panel for the same space, and
+     * because it is a queued step the card genuinely waits for them to finish.
+     */
+    /** Panels built before their zone change arrived, waiting to learn where they came from. */
+    private final Map<Integer, CardPanel> awaitingOrigin = new HashMap<>();
+
+    /**
+     * Hold a newly built panel until its zone change turns up.
+     * <p>
+     * Blanked straight away so it cannot flash before its animation, and released by a
+     * safety timer if the event never comes - a card must never be left invisible
+     * because of a missing animation.
+     */
+    private void awaitZoneChange(final int cardId, final CardPanel panel) {
+        panel.setRenderAlpha(0f);
+        panel.repaint();
+        synchronized (this) {
+            awaitingOrigin.put(cardId, panel);
+        }
+        clock.addFree(new Anim(400) {
+            @Override
+            protected void update(final float t) {
+            }
+
+            @Override
+            protected void onEnd() {
+                final CardPanel stranded;
+                synchronized (MatchAnimator.this) {
+                    stranded = awaitingOrigin.remove(cardId);
+                }
+                if (stranded != null) {
+                    stranded.clearRenderTransform();
+                    stranded.repaint();
+                }
+            }
+        });
+    }
+
+    /** The zone change caught up with a panel already built; animate it now. */
+    private void claimAwaitingPanel(final CardView card, final ZoneType from) {
+        final CardPanel panel;
+        synchronized (this) {
+            panel = awaitingOrigin.remove(card.getId());
+            if (panel == null) {
+                // The panel has not been built yet, so this event won the race and
+                // onPanelsAdded will do the work. Leaving the bookkeeping alone is the
+                // whole point: consuming it here made that later call see an unexpected
+                // arrival and park a card nothing would ever come back for.
+                return;
+            }
+            arriving.remove(card.getId());
+            arrivedFrom.remove(card.getId());
+        }
+        if (panel.getCard() != null) {
+            enqueueArrival(panel, card, originFor(from, card));
+        }
+    }
+
+    /** Set true to trace why a card entering play did or did not get an arrival beam. */
+    private static final boolean TRACE_ARRIVALS = true;
+
+    private void enqueueArrival(final CardPanel panel, final CardView card, final Point origin) {
+        if (TRACE_ARRIVALS) {
+            System.out.println("[anim] arrival " + card.getName()
+                    + " origin=" + origin + " dest=" + centreOf(panel)
+                    + " parentShowing=" + (panel.getParent() != null && panel.getParent().isShowing())
+                    + " layerShowing=" + layer.isShowing()
+                    + " bounds=" + panel.getX() + "," + panel.getY()
+                    + " " + panel.getWidth() + "x" + panel.getHeight());
+        }
+        // Hidden here and now, not when the step reaches the front of the queue. The
+        // panel is made visible by the zone refresh on a later EDT pass, so anything
+        // later than this lets a frame or two of the card through - it appeared, vanished
+        // again, then animated.
+        panel.setRenderAlpha(0f);
+        panel.repaint();
+
+        // A card must never be left invisible because an animation did not run. The step
+        // below reveals it in the normal case, but a reservation the queue gave up on has
+        // already played by the time it is filled, so its hook would never fire. This
+        // runs regardless and is harmless when the step got there first.
+        clock.addFree(new Anim(5000) {
+            @Override
+            protected void update(final float t) {
+            }
+
+            @Override
+            protected void onEnd() {
+                if (panel.getRenderAlpha() <= 0f) {
+                    panel.clearRenderTransform();
+                    panel.repaint();
+                }
+            }
+        });
+
+        // A fresh step, enqueued here and now. It is therefore always still ahead of the
+        // queue when its reveal is attached, which is what guarantees the card comes
+        // back - see the note in recordZoneChange about why this is not reserved.
+        final AnimationStep step = new AnimationStep("arrive:" + card.getName())
+                .after(() -> {
+                    panel.clearRenderTransform();
+                    clock.addFree(PanelAnim.fadeIn(panel, 320));
+                });
+        final Point dest = centreOf(panel);
+        if (origin != null && dest != null) {
+            step.add(new BeamAnim(origin, dest, CardColors.of(card, canShow(card)), 1f, 520));
+        }
+        queue.enqueue(step);
+        clock.start();
+    }
+
+    // ------------------------------------------------------------------ mana
+
+    /**
+     * Pulse the floating-mana readout in the colour that was just added, wherever it came
+     * from - a tapped land, a mana ability, or something resolving off the stack.
+     * <p>
+     * Runs free of the queue rather than through it: mana usually appears while the
+     * player is mid-payment, and holding the board back for it would put a pause in the
+     * middle of tapping lands.
+     */
+    private void recordManaAdded(final GameEventManaPool e) {
+        if (e.mode() != EventValueChangeType.Added || e.player() == null || e.colors() == null) {
+            return;
+        }
+        final List<MagicColor.Color> colors = new ArrayList<>(e.colors());
+        final PlayerView player = e.player();
+        FThreads.invokeInEdtLater(() -> {
+            for (final MagicColor.Color color : colors) {
+                final Point at = manaLabelCentre(player, color);
+                if (at != null) {
+                    clock.addFree(new ImpactAnim(at, List.of(manaColor(color)), 1f, 380, 0f));
+                }
+            }
             clock.start();
+        });
+    }
+
+    /** Centre of a player's readout for one mana colour, in overlay coordinates. */
+    private Point manaLabelCentre(final PlayerView player, final MagicColor.Color color) {
+        final VField field = fieldFor(player);
+        if (field == null) {
+            return null;
+        }
+        final JComponent label = field.getDetailsPanel().getManaLabel(color.ordinal());
+        if (label == null || !label.isShowing() || !layer.isShowing()) {
+            return null;
+        }
+        return SwingUtilities.convertPoint(label.getParent(),
+                label.getX() + label.getWidth() / 2, label.getY() + label.getHeight() / 2, layer);
+    }
+
+    /** The spark colour for a mana colour, matching how cards of it are tinted. */
+    private static Color manaColor(final MagicColor.Color color) {
+        switch (color) {
+            case WHITE: return new Color(254, 253, 244);
+            case BLUE: return new Color(90, 146, 202);
+            case BLACK: return new Color(140, 130, 140);
+            case RED: return new Color(253, 66, 40);
+            case GREEN: return new Color(22, 115, 69);
+            default: return new Color(160, 166, 164);
         }
     }
 
@@ -480,6 +673,14 @@ public final class MatchAnimator {
         private final List<CardView> cardTargets = new ArrayList<>(4);
         private final List<PlayerView> playerTargets = new ArrayList<>(2);
         private int total;
+        /**
+         * Whether this was a blow struck in combat, captured when the damage happened.
+         * <p>
+         * It cannot be read later: a {@link CardView} is live and the game thread keeps
+         * updating it, so by the time the flush runs on the EDT combat may already have
+         * ended and the attacker no longer say it is attacking.
+         */
+        private boolean combat;
 
         DamageGroup(final CardView source) {
             this.source = source;
@@ -491,12 +692,13 @@ public final class MatchAnimator {
     }
 
     private void recordDamage(final CardView source, final CardView cardTarget,
-            final PlayerView playerTarget, final int amount) {
+            final PlayerView playerTarget, final int amount, final boolean combat) {
         if (source == null || amount <= 0) {
             return;
         }
         synchronized (pendingDamage) {
             final DamageGroup g = pendingDamage.computeIfAbsent(source.getId(), k -> new DamageGroup(source));
+            g.combat |= combat;
             if (cardTarget != null) {
                 g.cardTargets.add(cardTarget);
             }
@@ -581,7 +783,10 @@ public final class MatchAnimator {
      */
     private void enqueueDirectHits(final DamageGroup g, final Map<Integer, Set<Integer>> counterHits) {
         final CardPanel sourcePanel = findPanel(g.source);
-        final Point from = centreOf(g.source);
+        // A damage spell has no panel - it is on the stack while it burns things - so its
+        // beams come from there. Requiring a panel meant such a spell drew nothing at all.
+        final Point onBoard = centreOf(g.source);
+        final Point from = onBoard != null ? onBoard : stackAnchor();
         final List<Color> palette = CardColors.of(g.source, canShow(g.source));
         final List<GameEntityView> targets = orderTargets(g);
         if (targets.isEmpty()) {
@@ -595,7 +800,7 @@ public final class MatchAnimator {
         // from the attacker's damage, and the attacker flinches from the blocker's own
         // damage group. Lunging is for the aggressor. A burn spell must not lunge
         // either, hence the combat check rather than just testing for a creature.
-        final boolean striking = sourcePanel != null && g.source.isAttacking();
+        final boolean striking = g.combat;
 
         // A striking attacker gets one step per target so they play in sequence;
         // everything else resolves as a single step with its hits shown together.
@@ -616,6 +821,11 @@ public final class MatchAnimator {
                 // Nothing moves, so the effect has to travel on its own.
                 step.add(new BeamAnim(from, to, palette, g.total, 460));
             }
+            if (target instanceof PlayerView pv) {
+                // A damaged player reacts too. Every player an effect hits gets one, so
+                // something that burns all opponents visibly rocks each of them.
+                step.add(playerFlinch(pv, palette));
+            }
             if (target instanceof CardView cv) {
                 final CardPanel tp = findPanel(cv);
                 if (tp != null && from != null) {
@@ -623,12 +833,23 @@ public final class MatchAnimator {
                 }
                 // If that blocker hit back, it recoils together with the attacker rather
                 // than in a beat of its own.
-                if (striking && counterHits.getOrDefault(g.source.getId(), Set.of()).contains(cv.getId())) {
+                if (striking && sourcePanel != null
+                        && counterHits.getOrDefault(g.source.getId(), Set.of()).contains(cv.getId())) {
                     step.add(PanelAnim.flinch(sourcePanel, toPanelSpace(sourcePanel, to), 260));
                 }
             }
             if (striking) {
-                step.add(PanelAnim.lunge(sourcePanel, toPanelSpace(sourcePanel, to), LUNGE_REACH, LUNGE_MS));
+                if (sourcePanel != null) {
+                    // Drawn on the overlay rather than by displacing the panel, so the
+                    // attacker passes over its neighbours and can leave its own row
+                    // instead of being clipped at the edge of its battlefield.
+                    final CardSnapshot snap = CardSnapshot.capture(sourcePanel, layer);
+                    step.add(snap != null
+                            ? OverlayFlight.lunge(sourcePanel, snap, to, LUNGE_REACH, LUNGE_MS)
+                            : PanelAnim.lunge(sourcePanel, toPanelSpace(sourcePanel, to), LUNGE_REACH, LUNGE_MS));
+                }
+                // Enqueued even with no panel to move: combat damage always reads as a
+                // strike, never as something travelling across the board.
                 queue.enqueue(step);
             }
         }
@@ -718,6 +939,11 @@ public final class MatchAnimator {
                 step.add(PanelAnim.flinch(tp, toPanelSpace(tp, origin), 300));
             }
         }
+        // And every player it burned, so an effect aimed at the whole table visibly
+        // rocks each of them rather than only sweeping their boards.
+        for (final PlayerView p : g.playerTargets) {
+            step.add(playerFlinch(p, palette));
+        }
         if (!step.isEmpty()) {
             queue.enqueue(step);
             clock.start();
@@ -742,32 +968,23 @@ public final class MatchAnimator {
             // Not a tracked departure - a re-layout or a match teardown, not a death.
             return;
         }
-        if (to == ZoneType.Stack) {
-            // A cast beginning: carry the card rather than fading it away, so it stays
-            // visible for as long as the game is still asking questions about it.
-            beginHold(panel, paymentAnchor());
-            return;
-        }
-        if (to == ZoneType.Battlefield) {
-            // No stack involved; it is already on its way to its slot, and lands there
-            // when the panel appears.
-            beginHold(panel, stackAnchor());
+        if (to == ZoneType.Battlefield || to == ZoneType.Stack) {
+            // Beginning a cast, or crossing onto the table. Neither is a departure; both
+            // reappear under their own animation.
             return;
         }
         final CardSnapshot snap = CardSnapshot.capture(panel, layer);
         if (snap == null) {
             return;
         }
-        // The real panel is about to vanish either way, so the ghost runs free of the
-        // queue rather than holding up the events behind it.
-        clock.addFree(to == ZoneType.Hand || to == ZoneType.Library
-                ? GhostAnim.flyTo(snap, handAnchor(panel.getCard()), 420)
-                : GhostAnim.fadeOut(snap, 520));
+        // The real panel is about to vanish, so the ghost runs free of the queue rather
+        // than holding up the events behind it.
+        clock.addFree(GhostAnim.fadeOut(snap, 520));
     }
 
     /**
-     * Called after a zone refresh has created panels, so newly arrived permanents can
-     * fade in rather than pop into place.
+     * Called after a zone refresh has created panels, so anything new fades up rather
+     * than popping into place.
      */
     public void onPanelsAdded(final List<CardPanel> panels) {
         if (panels == null || panels.isEmpty() || !isEnabled()) {
@@ -778,31 +995,114 @@ public final class MatchAnimator {
             if (card == null) {
                 continue;
             }
+            final ZoneType from;
             final boolean expected;
             synchronized (this) {
                 expected = arriving.remove(card.getId());
+                from = arrivedFrom.remove(card.getId());
             }
-            // A card that was held through its cast lands on its new panel instead of
-            // the panel fading in underneath it - otherwise the same card is drawn twice.
-            final HeldCard heldCard = takeHeld(card.getId());
-            if (heldCard != null && !heldCard.isFinishing()) {
-                dropHeld(card.getId());
-                final Point centre = centreOf(panel);
-                if (centre != null) {
-                    heldCard.landOn(panel, centre);
-                    clock.start();
-                    continue;
-                }
+            if (TRACE_ARRIVALS) {
+                System.out.println("[anim] panelAdded " + card.getName()
+                        + " expected=" + expected + " from=" + from + " token=" + card.isToken());
             }
-            // Tokens have no prior zone to leave, so they never raise a change-zone
-            // event; treat their first appearance as an arrival too.
-            if (expected || card.isToken()) {
-                clock.addFree(PanelAnim.fadeIn(panel, 320));
+            if (expected) {
+                enqueueArrival(panel, card, originFor(from, card));
+            } else {
+                // The zone change has not reached us yet. It cannot simply be waited for
+                // in order, because which of the two arrives first is a race: the card is
+                // put in its new zone before the event announcing it is fired, so a
+                // refresh already queued on the EDT can build the panel first. Park the
+                // panel and let whichever side finishes second start the animation.
+                awaitZoneChange(card.getId(), panel);
             }
         }
     }
 
+    /**
+     * Slide a card that layout has just repositioned from where it used to be.
+     * <p>
+     * Runs free of the queue: a reflow accompanies whatever caused it, so making it wait
+     * its turn would show the board rearranging itself well after the card that displaced
+     * everything had already settled.
+     */
+    /**
+     * @param before the card as it looked before layout moved it, or null to copy it as
+     *               it is now. Supplied on a resize, where copying it now would catch the
+     *               panel already resized but not yet redrawn - an empty black frame.
+     */
+    public void reflow(final CardPanel panel, final int dx, final int dy, final double scale,
+            final CardSnapshot before) {
+        if (panel == null || !isEnabled()) {
+            return;
+        }
+        // A card being hidden for its own arrival must not be dragged into a reflow; it
+        // is already where it belongs and is only waiting for its particles.
+        if (panel.getRenderAlpha() <= 0f) {
+            return;
+        }
+        // Retire the previous one first. Two reflows on the same card both write its
+        // offset every frame, so they fight and the card stutters between them. The
+        // replacement already starts from where the card visually is, because the
+        // capture that produced this delta included the old animation's offset.
+        final Anim previous = runningReflows.put(panel, null);
+        if (previous != null) {
+            previous.finish();
+        }
+        // Drawn on the overlay so the card is not clipped to its new bounds while it is
+        // still travelling and resizing into them. The panel transform is kept only as a
+        // fallback for when the card cannot be copied.
+        final CardSnapshot snap = before != null ? before : CardSnapshot.capture(panel, layer);
+        final Point destination = snap == null ? null : panelTopLeft(panel);
+        final Anim reflow = destination != null
+                ? OverlayFlight.reflow(panel, snap,
+                        destination, snap.getBounds().width / (double) Math.max(1, panel.getWidth()), 260)
+                : PanelAnim.reflow(panel, dx, dy, scale, 260);
+        runningReflows.put(panel, reflow);
+        clock.addFree(reflow);
+    }
+
+    /**
+     * The reflow currently animating each card, so a new one can replace it cleanly.
+     * <p>
+     * Weak-keyed so a card leaving the battlefield does not keep its panel alive.
+     */
+    private final Map<CardPanel, Anim> runningReflows = new java.util.WeakHashMap<>();
+
+    /**
+     * Where a permanent's arrival particles should start.
+     *
+     * @param from the zone it came out of, or null if it was created rather than moved.
+     */
+    private Point originFor(final ZoneType from, final CardView card) {
+        if (from == null || from == ZoneType.Stack) {
+            // Resolved off the stack, or created by something that was on it - a token.
+            // Either way the stack is what produced it.
+            return stackAnchor();
+        }
+        // Entered play directly out of a hand, library, graveyard or exile without ever
+        // being on the stack. Those zones are the player's, and drawing it out of the
+        // player reads correctly from both sides of the table - which the hand does not,
+        // since you cannot see your opponent's.
+        final PlayerView owner = card == null ? null
+                : (card.getOwner() != null ? card.getOwner() : card.getController());
+        final Point avatar = avatarCentre(owner);
+        return avatar != null ? avatar : stackAnchor();
+    }
+
     // ------------------------------------------------------------------ geometry
+
+    /** Where a resolving spell's effects originate: the stack it is resolving off. */
+    private Point stackAnchor() {
+        try {
+            final Rectangle bounds = boundsInLayer(matchUI.getCStack().getView().getParentCell());
+            if (bounds != null && bounds.width > 0) {
+                return new Point(bounds.x + bounds.width / 2, bounds.y + Math.min(90, bounds.height / 2));
+            }
+        } catch (final RuntimeException e) {
+            // The stack panel may not be laid out yet.
+        }
+        return new Point(layer.getWidth() / 2, layer.getHeight() / 3);
+    }
 
     private boolean canShow(final CardView card) {
         return card != null && matchUI.mayView(card);
@@ -835,11 +1135,48 @@ public final class MatchAnimator {
     }
 
     public Point centreOf(final CardPanel panel) {
-        if (panel == null || !panel.isShowing() || !layer.isShowing()) {
+        if (panel == null || !layer.isShowing()) {
             return null;
         }
-        return SwingUtilities.convertPoint(panel.getParent(),
-                panel.getX() + panel.getWidth() / 2, panel.getY() + panel.getHeight() / 2, layer);
+        // Deliberately the parent's isShowing, not the panel's. A component reports
+        // itself as not showing until it has a peer, which it only gets when the
+        // hierarchy is validated - and a card panel is laid out and handed to us before
+        // that happens. Testing the panel meant every newly created card measured as
+        // off-screen, so nothing entering play ever got a beam drawn to it.
+        final java.awt.Container parent = panel.getParent();
+        if (parent == null || !parent.isShowing()) {
+            return null;
+        }
+        // The centre of the card face, not of the component. A card panel is far larger
+        // than the card it draws - it reserves room on every side for the tap rotation -
+        // and the face is not centred in that box, so using the component's middle puts
+        // every beam and impact noticeably off the card.
+        return SwingUtilities.convertPoint(parent,
+                panel.getCardX() + panel.getCardWidth() / 2,
+                panel.getCardY() + panel.getCardHeight() / 2, layer);
+    }
+
+    /**
+     * A struck reaction over a player's avatar, or null if it is not on screen.
+     *
+     * @param palette the damaging card's colours, so the wash matches the effect.
+     */
+    private Anim playerFlinch(final PlayerView player, final List<Color> palette) {
+        final VField field = fieldFor(player);
+        final Rectangle area = field == null ? null : boundsInLayer(field.getAvatarArea());
+        if (area == null || area.width <= 0) {
+            return null;
+        }
+        return new RegionFlinch(area, palette.isEmpty() ? Color.RED : palette.get(0), 420);
+    }
+
+    /** A panel's component origin in overlay coordinates, for placing a copy of it. */
+    private Point panelTopLeft(final CardPanel panel) {
+        final java.awt.Container parent = panel.getParent();
+        if (parent == null || !parent.isShowing() || !layer.isShowing()) {
+            return null;
+        }
+        return SwingUtilities.convertPoint(parent, panel.getX(), panel.getY(), layer);
     }
 
     /** Centre of a player's avatar, the endpoint used for damage dealt to a player. */
@@ -882,12 +1219,6 @@ public final class MatchAnimator {
         } catch (final RuntimeException e) {
             return null;
         }
-    }
-
-    /** Where a card returning to hand should fly; falls back to its controller's avatar. */
-    private Point handAnchor(final CardView card) {
-        final Point avatar = avatarCentre(card.getController());
-        return avatar != null ? avatar : new Point(layer.getWidth() / 2, layer.getHeight());
     }
 
     /** Convert an overlay point into the coordinate space of a panel's parent. */

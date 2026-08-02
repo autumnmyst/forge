@@ -469,6 +469,11 @@ public final class CMatchUI
         animator.receiveGameEvent(event);
     }
 
+    @Override
+    public boolean deferGameEventSound(final Runnable playSound) {
+        return animator.deferSound(playSound);
+    }
+
 
     @Override
     public void setCard(final CardView c) {
@@ -541,6 +546,16 @@ public final class CMatchUI
 
     @Override
     public void updateZones(final Iterable<PlayerZoneUpdate> zonesToUpdate) {
+        // Wait for the animations already playing before redrawing the board, so a
+        // creature is not gone from the battlefield while its death is still on screen.
+        // The caller has already copied this collection, so it is safe to hold on to.
+        if (animator.defer("zones", () -> applyZoneUpdates(zonesToUpdate))) {
+            return;
+        }
+        applyZoneUpdates(zonesToUpdate);
+    }
+
+    private void applyZoneUpdates(final Iterable<PlayerZoneUpdate> zonesToUpdate) {
         for (final PlayerZoneUpdate update : zonesToUpdate) {
             final PlayerView owner = update.getPlayer();
 
@@ -663,6 +678,19 @@ public final class CMatchUI
 
     @Override
     public void updateCards(final Iterable<CardView> cards) {
+        // Copied before anything else: the event handler hands over its live set and
+        // clears it the moment this returns, so a deferred run would find it empty and
+        // the board would quietly stop refreshing cards altogether.
+        final List<CardView> snapshot = Lists.newArrayList(cards);
+        // Held behind the animations for the same reason zone updates are - a creature
+        // should not show the damage before the blow that dealt it has landed.
+        if (animator.defer("cards", () -> applyCardUpdates(snapshot))) {
+            return;
+        }
+        applyCardUpdates(snapshot);
+    }
+
+    private void applyCardUpdates(final Iterable<CardView> cards) {
         for (final CardView c : cards) {
             // Null can flow in from a remote-side event whose IdRef failed to resolve in the tracker.
             if (c == null) { continue; }
@@ -983,6 +1011,16 @@ public final class CMatchUI
 
     @Override
     public void finishGame() {
+        // Let the board finish playing out before the win/lose screen covers it. The
+        // last blow of a game is the one most worth seeing, and it was being hidden by
+        // the result the moment the game thread reached it.
+        if (animator.defer("finish", this::showGameResult)) {
+            return;
+        }
+        showGameResult();
+    }
+
+    private void showGameResult() {
         FloatingZone.closeAll(); //ensure floating card areas cleared and closed after the game
         if (isNetGame()) {
             writeMatchPreferences();
@@ -998,7 +1036,13 @@ public final class CMatchUI
 
     @Override
     public void updateStack() {
-        FThreads.invokeInEdtNowOrLater(() -> getCStack().update());
+        // Kept in step with everything else: a spell should appear on the stack as its
+        // cast animation arrives there, not the instant the game thread put it there.
+        FThreads.invokeInEdtNowOrLater(() -> {
+            if (!animator.defer("stack", () -> getCStack().update())) {
+                getCStack().update();
+            }
+        });
     }
 
     /**
