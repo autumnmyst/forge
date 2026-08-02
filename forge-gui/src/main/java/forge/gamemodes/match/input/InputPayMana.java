@@ -423,6 +423,15 @@ public abstract class InputPayMana extends InputSyncronizedBase {
             done();
             stop();
         } else {
+            // The plan the Auto button would follow is only valid for the cost that was
+            // outstanding when it was worked out. Every route into here has just changed
+            // that cost - a mana ability activated, mana spent out of the pool - so the
+            // plan, and the highlights drawn from it, have to be worked out again.
+            //
+            // Previously this was only done when the ability itself cost mana to
+            // activate, which is the rare case; tapping a land left the highlights
+            // showing a plan that still included the land just tapped.
+            invalidateAutoPayManaSources();
             FThreads.invokeInEdtNowOrLater(this::updateMessage);
         }
     }
